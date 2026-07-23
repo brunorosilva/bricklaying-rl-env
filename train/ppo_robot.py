@@ -59,6 +59,9 @@ class Args:
                                 # starts the base at a random point so work is sometimes to the
                                 # LEFT -> reach-shaping rewards moving left -> learns to navigate
                                 # both directions (robust to any start), not just sweep right.
+    drop_control: bool = False  # box[1] chooses the release height (the arm homes at the wall
+                                # top; the model lowers it before releasing). Impact velocity is
+                                # an emergent consequence of the fall -> precision via physics.
     suite: str = "robot"        # small walls (3-5 modules): completable, so it learns to
                                 # finish a course and stack levels (big walls are too long-horizon)
     eval_suite: str = "robot_eval"
@@ -72,14 +75,17 @@ class Args:
     wandb_project: str = "atrium-sim"
 
 
-def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool):
+def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
+             drop_control: bool = False):
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
         # c_reach 4x: strongly reward moving toward the nearest open slot (either
         # direction). random_start controls whether work can be to the LEFT of the
         # base (forcing MOVE_LEFT to be learned) or always to the right (sweep only).
-        u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0)
+        # drop_control: box[1] chooses the release height (impact velocity is emergent).
+        u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
+                                    drop_control=drop_control)
         # softer collapse/waste penalties so the agent is less "afraid" to attempt
         # the hard last bricks (top course, half-brick ends); precision plateau unchanged
         u.reward_cfg = type(u.reward_cfg)(
@@ -91,25 +97,32 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool):
 
 
 def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: float,
-                   sigma_deg: float, random_start: bool) -> dict:
+                   sigma_deg: float, random_start: bool, drop_control: bool = False) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0)  # match training
+    u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
+                                drop_control=drop_control)  # match training
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
     policy = HybridAgentPolicy(agent)
     specs = _SUITES[suite]
     keys = ("episode_return", "frac_in_tol", "frac_filled", "completed", "moves", "placements")
     acc = {k: [] for k in keys}
+    lowers = []  # drop_control diagnostic: mean decoded lower_frac on PLACE actions
     for i in range(episodes):
         obs, _ = env.reset(seed=10000 + i, options={"spec": specs[i % len(specs)]})
         done = False
         while not done:
-            obs, r, term, trunc, info = env.step(policy.act(obs))
+            action = policy.act(obs)
+            if int(action[0]) == 0:  # Mode.PLACE
+                lowers.append((float(action[1][1]) + 1.0) / 2.0)
+            obs, r, term, trunc, info = env.step(action)
             done = term or trunc
         for k in keys:
             acc[k].append(info["metrics"][k])
     env.close()
-    return {k: float(np.mean(v)) for k, v in acc.items()}
+    out = {k: float(np.mean(v)) for k, v in acc.items()}
+    out["lower_frac"] = float(np.mean(lowers)) if lowers else 0.0
+    return out
 
 
 def main(args: Args) -> dict:
@@ -138,7 +151,7 @@ def main(args: Args) -> dict:
         torch.set_num_threads(args.torch_threads)
 
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start)
+        [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start, args.drop_control)
          for _ in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
@@ -274,7 +287,7 @@ def main(args: Args) -> dict:
                        "mode_entropy": cat_ent.mean().item(), "approx_kl": approx_kl.item()}
 
         if args.eval_interval and update % args.eval_interval == 0:
-            last_eval = evaluate_robot(agent, args.eval_episodes, args.eval_suite, args.sigma_mm, args.sigma_deg, args.random_start)
+            last_eval = evaluate_robot(agent, args.eval_episodes, args.eval_suite, args.sigma_mm, args.sigma_deg, args.random_start, args.drop_control)
             n_evals += 1
             for k, v in last_eval.items():
                 writer.add_scalar(f"eval/{k}", v, global_step)
@@ -285,7 +298,8 @@ def main(args: Args) -> dict:
 
                     genv = gym.make("atrium_sim/BrickLayerRobot-v0", render_mode="rgb_array")
                     genv.unwrapped.env_cfg = type(genv.unwrapped.env_cfg)(
-                        random_start=args.random_start, c_reach=2.0)
+                        random_start=args.random_start, c_reach=2.0,
+                        drop_control=args.drop_control)
                     genv.unwrapped.reward_cfg = type(genv.unwrapped.reward_cfg)(
                         sigma_mm=args.sigma_mm, sigma_deg=args.sigma_deg)
                     record_episode(genv, HybridAgentPolicy(agent),

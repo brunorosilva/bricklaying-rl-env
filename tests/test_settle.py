@@ -76,3 +76,29 @@ def test_spawn_probe_never_overlaps():
     # the assert inside spawn_brick is the real check; sanity: nothing exploded
     assert world.n_bricks <= 8
     assert all(p.y < 500 for p in world.poses())
+
+
+def test_release_y_never_injects_overlap():
+    """Drop-control release heights still go through the overlap probe: repeated
+    same-spot HIGH-release placements stack cleanly, never injecting overlap."""
+    bp = generate_blueprint(WallSpec(4, 2))
+    world = PhysicsWorld(bp.length)
+    for _ in range(8):
+        world.spawn_brick(bp.length / 2, bp.targets[0].kind, 0, release_y=400.0)
+        world.settle(MAX_SETTLE_SUBSTEPS)
+    assert world.n_bricks <= 8
+    assert all(p.y < 500 for p in world.poses())
+
+
+def test_high_release_falls_longer_than_gentle():
+    """Release height drives the fall dynamics: a brick released near the ceiling
+    takes more substeps to settle than the gentle drop (longer free-fall)."""
+    bp = generate_blueprint(WallSpec(4, 2))
+
+    def settle_substeps(release_y):
+        w = PhysicsWorld(bp.length)
+        w.spawn_brick(bp.length / 2, bp.targets[0].kind, 0, release_y=release_y)
+        substeps, _ = w.settle(MAX_SETTLE_SUBSTEPS)
+        return substeps
+
+    assert settle_substeps(400.0) > settle_substeps(35.0)

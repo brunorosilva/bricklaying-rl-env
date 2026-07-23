@@ -93,8 +93,14 @@ class PhysicsWorld:
 
     # --- spawning -----------------------------------------------------------
 
-    def spawn_brick(self, x: float, kind: BrickKind, course: int) -> int | None:
-        """Place a brick as a dynamic body slightly above rest height for `course`.
+    def spawn_brick(self, x: float, kind: BrickKind, course: int,
+                    release_y: float | None = None) -> int | None:
+        """Place a brick as a dynamic body and let it fall/settle.
+
+        By default it spawns `SPAWN_DROP_MM` above rest height for `course` (the
+        gentle drop). If `release_y` is given (drop-control mode), the brick is
+        released from that height instead (floored at the gentle height), so its
+        impact velocity is an emergent consequence of the fall distance.
 
         An overlap probe raises the spawn until clear so an overlapping body is
         NEVER injected (deep-overlap resolution flings bricks across the canvas).
@@ -109,7 +115,11 @@ class PhysicsWorld:
         shape.friction = FRICTION_BRICK
         shape.elasticity = 0.0
 
-        y = COURSE_MM * course + h / 2.0 + SPAWN_DROP_MM
+        gentle_y = COURSE_MM * course + h / 2.0 + SPAWN_DROP_MM
+        # release_y=None -> identical to the original fixed gentle drop; otherwise
+        # honor the requested height but never start below gentle (the probe only
+        # ever raises y, preserving the never-inject-overlap guarantee).
+        y = gentle_y if release_y is None else max(release_y, gentle_y)
         ceiling = H_MAX + 120.0
         while y <= ceiling:
             body.position = (x, y)

@@ -51,8 +51,11 @@ COLLISION_SLOP = 0.1            # mm of allowed overlap. Slop sag is systematic 
                                 # measurably does not hurt sleep-based settling.
 
 # --- Placement mechanics ---
-SPAWN_DROP_MM = 5.0             # brick spawns this far above rest height
+SPAWN_DROP_MM = 5.0             # brick spawns this far above rest height (the gentle drop)
 SPAWN_PROBE_STEP_MM = 10.0      # overlap probe raises spawn y in these steps
+DROP_ARM_MARGIN_MM = 60.0       # drop-control mode: the arm "homes" this far above the wall
+                                # top; the model picks how far to lower it before releasing,
+                                # so impact velocity is an emergent consequence of the fall
 OVERHANG_MM = 30.0              # max allowed x-overhang past wall ends when decoding actions
 OOB_Y_MM = -100.0               # brick centre below this -> removed, counted as waste
 OOB_X_MARGIN_MM = 400.0         # brick centre past wall ends by this -> removed

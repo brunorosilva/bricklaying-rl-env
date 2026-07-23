@@ -40,7 +40,10 @@ from atrium_sim.blueprint import (
     sample_spec,
 )
 from atrium_sim.constants import (
+    COURSE_MM,
+    DROP_ARM_MARGIN_MM,
     FINAL_SETTLE_SUBSTEPS,
+    H_MAX,
     L_MAX,
     MAX_SETTLE_SUBSTEPS,
     MOVE_COST_FRAC,
@@ -48,6 +51,7 @@ from atrium_sim.constants import (
     OFFSET_RANGE_MM,
     OVERHANG_MM,
     REACH_MM,
+    SPAWN_DROP_MM,
 )
 from atrium_sim.physics import PhysicsWorld
 from atrium_sim.reward import AuditReport, RewardConfig, audit, potential
@@ -89,6 +93,12 @@ class RobotEnvConfig:
                                       # x=0), so work is sometimes to the LEFT and the agent has
                                       # to learn MOVE_LEFT - without this it only ever sweeps right,
                                       # can't backtrack for gaps, and never returns to build up.
+    drop_control: bool = False        # when True the model chooses the RELEASE HEIGHT: the arm
+                                      # homes at the wall top and box[1] (the otherwise-vestigial
+                                      # kind dim) picks how far to lower it before release. Impact
+                                      # velocity is then an emergent consequence of the fall.
+                                      # False => identical to before (fixed gentle drop).
+    arm_margin_mm: float = DROP_ARM_MARGIN_MM   # arm "home" height above the wall top (drop mode)
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
@@ -142,6 +152,8 @@ class BrickLayerRobotEnv(gym.Env):
         self.placements = 0
         self.moves = 0
         self._moves_since_place = 0   # consecutive MOVEs since the last brick placed (wander)
+        self._release_y = None        # drop-control: last release height (for the renderer)
+        self._arm_top_y = None
         self.halves_used = 0
         self.off_canvas = 0
         self.invalid = 0
@@ -226,12 +238,9 @@ class BrickLayerRobotEnv(gym.Env):
         if target is None:  # PLACE with nothing reachable: wasted step
             self.invalid += 1
             return -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
-        # kind is dictated by the blueprint slot (a masonry robot is TOLD which
-        # brick the plan calls for) — the agent controls navigation + offset only.
-        # box[1] is vestigial; kept for action-shape compat with older checkpoints.
-        # This unblocks the odd-course end-HALF bricks the agent never learned to
-        # emit via box[1]'s sign (always-FULL was the easy attractor), which in
-        # turn unblocks the even-course end-fulls that rest on them.
+        # kind is dictated by the blueprint slot (a masonry robot is TOLD which brick
+        # the plan calls for). The agent controls navigation + the placement offset
+        # (box[0]); box[1] is the release height ONLY in drop_control mode (else unused).
         kind = target.kind
         if kind == BrickKind.HALF:
             self.halves_used += 1
@@ -242,8 +251,10 @@ class BrickLayerRobotEnv(gym.Env):
         x = float(np.clip(x, lo, hi))
         self.placements += 1
         self._moves_since_place = 0  # placing a brick resets the wander streak
+        release_y = self._release_height(target.course, box) if self.env_cfg.drop_control else None
+        self._release_y = release_y
         pre = self.world.positions()
-        bid = self.world.spawn_brick(x, kind, target.course)
+        bid = self.world.spawn_brick(x, kind, target.course, release_y=release_y)
         if bid is None:
             self.off_canvas += 1
         removed = self._settle(self.env_cfg.max_settle_substeps)
@@ -251,6 +262,18 @@ class BrickLayerRobotEnv(gym.Env):
         self.report = self._audit()
         self.last_disturbance = self._disturbance(pre, bid)
         return potential(self.report, self.reward_cfg) - prev_phi
+
+    def _release_height(self, course: int, box: np.ndarray) -> float:
+        """Drop-control: box[1] in [-1,1] picks how far to lower the arm from its home
+        at the wall top before releasing. box[1]=+1 -> fully lowered (gentle, identical
+        to the fixed drop); box[1]=-1 -> released from the top (longest fall, hardest
+        impact). Impact velocity is thus emergent from the fall distance, not chosen."""
+        lower_frac = (float(box[1]) + 1.0) / 2.0
+        gentle_y = COURSE_MM * (course + 0.5) + SPAWN_DROP_MM
+        arm_top_y = COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm
+        self._arm_top_y = arm_top_y
+        release_y = gentle_y + (1.0 - lower_frac) * max(0.0, arm_top_y - gentle_y)
+        return float(np.clip(release_y, gentle_y, H_MAX + 120.0 - 1.0))
 
     def _do_move(self, mode: Mode) -> float:
         step = self.env_cfg.move_step_mm * (-1.0 if mode == Mode.MOVE_LEFT else 1.0)

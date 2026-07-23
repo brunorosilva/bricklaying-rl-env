@@ -99,8 +99,26 @@ def build_robot_policy(name: str, env):
     raise ValueError(f"unknown robot policy: {name!r}")
 
 
+def _robot_drop_control(policy_name: str) -> bool:
+    """A drop-trained checkpoint stores drop_control in its args; the replay env must
+    match so the release-height mechanic reproduces (older checkpoints default False)."""
+    if not policy_name.startswith("ckpt:"):
+        return False
+    try:
+        import torch
+
+        ck = torch.load(str(ROBOT_RUNS_DIR / policy_name[5:] / "ckpt.pt"),
+                        weights_only=True, map_location="cpu")
+        return bool(ck.get("args", {}).get("drop_control", False))
+    except Exception:
+        return False
+
+
 def run_robot_episode(policy_name: str, seed: int, spec_str: str) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    if _robot_drop_control(policy_name):
+        u = env.unwrapped
+        u.env_cfg = type(u.env_cfg)(drop_control=True)
     try:
         policy = build_robot_policy(policy_name, env)
         return record_robot_trajectory(env, policy, seed=seed, spec=parse_spec(spec_str))

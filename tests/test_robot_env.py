@@ -60,3 +60,60 @@ def test_oracle_completes_by_moving(spec):
     assert m["frac_in_tol"] >= 0.9
     assert m["moves"] > 0  # it genuinely had to move
     env.close()
+
+
+# --- drop-control (model-chosen release height) -----------------------------
+
+def _run_place_only(box1: float, drop_control: bool):
+    """Build a 2x2 wall (fully within reach from base 0) with PLACE-only actions,
+    box[1]=box1. Returns (total_reward, frac_filled, settled poses) for comparison."""
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(
+        random_start=False, drop_control=drop_control)
+    env.reset(seed=3, options={"spec": WallSpec(2, 2)})
+    u = env.unwrapped
+    total, done = 0.0, False
+    while not done:
+        _, r, term, trunc, info = env.step((int(Mode.PLACE), np.array([0.0, box1], np.float32)))
+        total += r
+        done = term or trunc
+    poses = tuple((round(p.x, 3), round(p.y, 3)) for p in u.world.poses())
+    env.close()
+    return round(total, 6), info["metrics"]["frac_filled"], poses
+
+
+def test_drop_control_off_box1_inert():
+    """With drop_control off, box[1] must have zero effect (it's the vestigial kind dim)."""
+    assert _run_place_only(1.0, drop_control=False) == _run_place_only(-1.0, drop_control=False)
+
+
+def test_drop_gentle_reproduces_fixed_drop():
+    """drop_control on with box[1]=+1 (arm fully lowered) == the fixed gentle drop."""
+    assert _run_place_only(1.0, drop_control=False) == _run_place_only(1.0, drop_control=True)
+
+
+def test_drop_control_shapes_unchanged():
+    """Enabling drop_control must not change the action or observation shapes."""
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(drop_control=True)
+    obs, _ = env.reset(seed=1)
+    assert env.action_space.spaces[1].shape == (2,)
+    assert obs.shape == (OBS_DIM,) == (544,)
+    env.close()
+
+
+def test_release_height_monotone_and_endpoints():
+    """box[1]=+1 -> gentle height; box[1]=-1 -> arm top; strictly monotone between."""
+    from atrium_sim.constants import COURSE_MM, SPAWN_DROP_MM
+
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    u = env.unwrapped
+    u.env_cfg = type(u.env_cfg)(drop_control=True)
+    env.reset(seed=1, options={"spec": WallSpec(4, 3)})
+    gentle = COURSE_MM * 0.5 + SPAWN_DROP_MM
+    top = COURSE_MM * u.blueprint.n_courses + u.env_cfg.arm_margin_mm
+    rh = lambda b1: u._release_height(0, np.array([0.0, b1], np.float32))
+    assert rh(1.0) == pytest.approx(gentle)
+    assert rh(-1.0) == pytest.approx(top)
+    assert rh(1.0) < rh(0.0) < rh(-1.0)
+    env.close()
