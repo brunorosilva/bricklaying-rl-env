@@ -1,0 +1,44 @@
+[project]
+name = "atrium-sim"
+version = "0.1.0"
+description = "Physics-based bricklaying RL environment (Gymnasium + PyMunk): lay a running-bond wall to BIM ±3mm tolerance."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Bruno Chicelli" }]
+keywords = ["reinforcement-learning", "gymnasium", "pymunk", "construction", "robotics"]
+dependencies = [
+    "gymnasium>=1.1,<2",
+    "pymunk>=6.9,<7",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+render = ["pygame-ce>=2.5", "imageio>=2.34"]
+train = ["torch>=2.3", "tensorboard>=2.16", "tyro>=0.8"]
+track = ["wandb>=0.17"]
+plot = ["matplotlib>=3.8", "tbparse>=0.0.8"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["atrium_sim"]
+
+# MLP-scale training runs fine on CPU; the CPU wheel keeps installs small.
+# Delete this block to get the default (CUDA) torch build.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

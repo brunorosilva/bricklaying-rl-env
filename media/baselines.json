@@ -1,0 +1,29 @@
+{
+  "oracle": {
+    "episode_return": 12.800000000000002,
+    "frac_in_tol": 1.0,
+    "frac_filled": 1.0,
+    "waste_frac": 0.0,
+    "completed": 1.0,
+    "score": 1.0,
+    "mean_abs_dev_mm": 0.2791745629113603
+  },
+  "greedy": {
+    "episode_return": -2.1773739303285606,
+    "frac_in_tol": 0.2443181818181818,
+    "frac_filled": 0.29545454545454547,
+    "waste_frac": 0.8778409090909092,
+    "completed": 0.0,
+    "score": -0.19427148394194685,
+    "mean_abs_dev_mm": 5.944451475539741
+  },
+  "random": {
+    "episode_return": -7.869149858891078,
+    "frac_in_tol": 0.003787878787878788,
+    "frac_filled": 0.062263257575757576,
+    "waste_frac": 1.550662878787879,
+    "completed": 0.0,
+    "score": -0.763449076798199,
+    "mean_abs_dev_mm": 24.929630028010845
+  }
+}

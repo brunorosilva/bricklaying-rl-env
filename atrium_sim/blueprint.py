@@ -1,0 +1,156 @@
+"""Wall specifications and blueprint (target brick layout) generation.
+
+A blueprint is the ground truth the agent is scored against: one target pose
+per brick of a running-bond (halfsteensverband) wall. Even courses are all
+full bricks; odd courses start and end with a half brick so the head joints
+land mid-brick on the courses below.
+
+This module owns all wall geometry. It is deliberately free of physics and
+gymnasium imports so the reward audit (and, later, the GRPO/VLM pipelines)
+can consume blueprints standalone.
+"""
+
+from __future__ import annotations
+
+import itertools
+from dataclasses import dataclass, field
+from enum import IntEnum
+
+import numpy as np
+
+from atrium_sim.constants import (
+    BRICK_FULL_MM,
+    BRICK_HALF_MM,
+    COURSE_MM,
+    MODULE_MM,
+    brick_budget,
+    wall_length,
+)
+
+
+class BrickKind(IntEnum):
+    FULL = 0
+    HALF = 1
+
+
+def brick_face(kind: BrickKind) -> tuple[float, float]:
+    """Rendered face (w, h) in mm for a brick kind."""
+    return BRICK_FULL_MM if kind == BrickKind.FULL else BRICK_HALF_MM
+
+
+@dataclass(frozen=True)
+class WallSpec:
+    n_modules: int
+    n_courses: int
+
+
+@dataclass(frozen=True)
+class BrickTarget:
+    tid: int          # global target id (== index into Blueprint.targets)
+    course: int       # 0 = bottom
+    slot: int         # index within course, left to right
+    x: float          # face-centre x, mm
+    y: float          # face-centre y, mm (envelope centre; course 0 rests on ground)
+    kind: BrickKind
+
+
+@dataclass(frozen=True)
+class Blueprint:
+    spec: WallSpec
+    length: float                       # wall length L, mm
+    targets: tuple[BrickTarget, ...]    # ordered by (course, slot)
+    _courses: tuple[tuple[BrickTarget, ...], ...] = field(repr=False, default=())
+
+    @property
+    def n_targets(self) -> int:
+        return len(self.targets)
+
+    @property
+    def n_halves(self) -> int:
+        return sum(1 for t in self.targets if t.kind == BrickKind.HALF)
+
+    @property
+    def n_courses(self) -> int:
+        return self.spec.n_courses
+
+    @property
+    def budget(self) -> int:
+        return brick_budget(self.n_targets)
+
+    def course_targets(self, course: int) -> tuple[BrickTarget, ...]:
+        return self._courses[course]
+
+
+def _course_targets(course: int, n_modules: int, length: float) -> list[tuple[float, BrickKind]]:
+    """(x, kind) for one course, left to right."""
+    if course % 2 == 0:
+        return [(105.0 + MODULE_MM * k, BrickKind.FULL) for k in range(n_modules)]
+    bricks: list[tuple[float, BrickKind]] = [(50.0, BrickKind.HALF)]
+    bricks += [(215.0 + MODULE_MM * k, BrickKind.FULL) for k in range(n_modules - 1)]
+    bricks.append((length - 50.0, BrickKind.HALF))
+    return bricks
+
+
+def generate_blueprint(spec: WallSpec) -> Blueprint:
+    """Deterministic running-bond blueprint for a wall spec."""
+    length = wall_length(spec.n_modules)
+    targets: list[BrickTarget] = []
+    courses: list[tuple[BrickTarget, ...]] = []
+    tid = 0
+    for c in range(spec.n_courses):
+        y = 30.0 + COURSE_MM * c
+        course: list[BrickTarget] = []
+        for slot, (x, kind) in enumerate(_course_targets(c, spec.n_modules, length)):
+            course.append(BrickTarget(tid=tid, course=c, slot=slot, x=x, y=y, kind=kind))
+            tid += 1
+        targets.extend(course)
+        courses.append(tuple(course))
+    return Blueprint(spec=spec, length=length, targets=tuple(targets), _courses=tuple(courses))
+
+
+# --- Spec suites -------------------------------------------------------------
+# Held-out suites let eval demonstrate generalisation to wall sizes never
+# trained on. INTERP sits inside the training distribution's bounding box;
+# EXTRAP sits outside it (larger walls, still within obs padding S_MAX/C_MAX).
+
+INTERP_SPECS: tuple[WallSpec, ...] = (WallSpec(5, 4), WallSpec(7, 3), WallSpec(6, 5))
+EXTRAP_SPECS: tuple[WallSpec, ...] = (WallSpec(9, 5), WallSpec(10, 6))
+TRAIN_SPECS: tuple[WallSpec, ...] = tuple(
+    WallSpec(m, c)
+    for m, c in itertools.product(range(4, 9), range(2, 6))
+    if WallSpec(m, c) not in INTERP_SPECS
+)
+
+# Mobile-robot suites: small walls that still require moving (3+ modules exceed
+# the ~500mm reach) but are short-horizon enough that the agent can complete a
+# course, advance, and stack levels - the skill it can't discover on big walls.
+ROBOT_EVAL_SPECS: tuple[WallSpec, ...] = (WallSpec(4, 3), WallSpec(5, 2))
+ROBOT_SPECS: tuple[WallSpec, ...] = tuple(
+    WallSpec(m, c)
+    for m, c in itertools.product((3, 4, 5), (2, 3))
+    if WallSpec(m, c) not in ROBOT_EVAL_SPECS
+)
+
+# Mixed small->big curriculum: small walls give an easy completion signal to learn
+# on, big walls force real navigation (and exercise the anti-wander penalty). The
+# eval set is HELD OUT of training and spans small/mid/big to measure generalization
+# across wall sizes - the axis where the small-only "robot" suite doesn't transfer.
+ROBOT_BIG_EVAL_SPECS: tuple[WallSpec, ...] = (
+    WallSpec(4, 3), WallSpec(6, 4), WallSpec(8, 5),
+)
+ROBOT_BIG_SPECS: tuple[WallSpec, ...] = tuple(
+    WallSpec(m, c)
+    for m, c in itertools.product(range(3, 9), range(2, 6))
+    if WallSpec(m, c) not in ROBOT_BIG_EVAL_SPECS
+)
+
+_SUITES = {
+    "train": TRAIN_SPECS, "interp": INTERP_SPECS, "extrap": EXTRAP_SPECS,
+    "robot": ROBOT_SPECS, "robot_eval": ROBOT_EVAL_SPECS,
+    "robot_big": ROBOT_BIG_SPECS, "robot_big_eval": ROBOT_BIG_EVAL_SPECS,
+}
+
+
+def sample_spec(rng: np.random.Generator, suite: str = "train") -> WallSpec:
+    specs = _SUITES[suite]
+    return specs[int(rng.integers(len(specs)))]

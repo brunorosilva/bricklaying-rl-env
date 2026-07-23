@@ -389,3 +389,7 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,linux,macos,node,nextjs
+# atrium-sim: commit run checkpoints (ckpt.pt) + eval GIFs, but keep out the heavy,
+# regenerable TensorBoard event logs (~440MB). Per-arch sweep text logs are covered by *.log.
+runs/**/events.out.tfevents.*
+runs/**/*.log
