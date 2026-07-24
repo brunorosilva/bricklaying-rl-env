@@ -31,7 +31,7 @@ ARCHITECTURES = [
     "mlp_dropout",   # 2x128 tanh + dropout 0.1
     "mlp_layernorm", # 2x128 tanh + layernorm
     "resmlp",        # input proj + 2 residual blocks
-    "cnn",           # conv over the (feature, course, slot) grid
+    "cnn",           # conv stack -> pool -> 2-layer dense head over the grid
     "attention",     # 1-layer transformer over the 66 slot tokens
     "attention2",    # 2-layer transformer
 ]
@@ -98,23 +98,36 @@ class ResMLP(nn.Module):
 
 
 class CNN(nn.Module):
-    def __init__(self, n_glob=N_GLOB, hidden=128, channels=32):
+    """A proper convnet: a conv stack over the (course x slot) brick grid, an
+    adaptive pool, then a multi-layer dense head with the global scalars fused in -
+    the standard conv-stack -> pool -> flatten -> dense-head shape, instead of the
+    old conv -> single-Linear projection. Conv blocks read local brick neighborhoods
+    (3x3 receptive field, deepening 8->32->32->64); the pool gives a fixed 3x5 coarse
+    map; the two dense layers do the reasoning on top."""
+
+    POOL = (3, 5)  # coarse spatial map after the conv stack (6x11 -> 3x5)
+
+    def __init__(self, n_glob=N_GLOB, hidden=128):
         super().__init__()
         self.split = _SlotSplit()
         self.conv = nn.Sequential(
-            layer_init(nn.Conv2d(N_SLOT_FEATURES, channels, 3, padding=1)), nn.Tanh(),
-            layer_init(nn.Conv2d(channels, channels, 3, padding=1)), nn.Tanh(),
+            layer_init(nn.Conv2d(N_SLOT_FEATURES, 32, 3, padding=1)), nn.Tanh(),
+            layer_init(nn.Conv2d(32, 32, 3, padding=1)), nn.Tanh(),
+            layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.Tanh(),
+            nn.AdaptiveAvgPool2d(self.POOL),
         )
-        self.fc = nn.Sequential(
-            layer_init(nn.Linear(channels * C_MAX * S_MAX + n_glob, hidden)), nn.Tanh(),
+        conv_out = 64 * self.POOL[0] * self.POOL[1]
+        self.head = nn.Sequential(
+            layer_init(nn.Linear(conv_out + n_glob, 256)), nn.Tanh(),
+            layer_init(nn.Linear(256, hidden)), nn.Tanh(),
         )
         self.feat_dim = hidden
 
     def forward(self, x):
         slots, glob = self.split(x)
-        c = self.conv(slots.permute(0, 3, 1, 2))  # (B, F, C, S)
+        c = self.conv(slots.permute(0, 3, 1, 2))  # (B, F, C, S) -> (B, 64, 3, 5)
         c = c.reshape(c.shape[0], -1)
-        return self.fc(torch.cat([c, glob], dim=1))
+        return self.head(torch.cat([c, glob], dim=1))
 
 
 class SlotAttention(nn.Module):
