@@ -60,6 +60,8 @@ def launch(arch: str, a: argparse.Namespace) -> subprocess.Popen:
         cmd += ["--device", device]
         if a.random_start:  # train the robot9 bidirectional task (base starts anywhere)
             cmd += ["--random-start"]
+        if a.drop_control:  # train the robot11 drop-height task (box[1] = release height)
+            cmd += ["--drop-control"]
     env = os.environ.copy()
     env["OMP_NUM_THREADS"] = str(threads)
     env["MKL_NUM_THREADS"] = str(threads)
@@ -126,6 +128,8 @@ def main() -> None:
     p.add_argument("--robot", action="store_true", help="sweep the mobile-robot task (hybrid head)")
     p.add_argument("--random-start", action="store_true",
                    help="robot: base starts anywhere (robot9 bidirectional task)")
+    p.add_argument("--drop-control", action="store_true",
+                   help="robot: model chooses release height (robot11 drop-height task)")
     p.add_argument("--gpu", action="store_true",
                    help="robot: run matmul-bound archs (cnn/attention) on CUDA")
     p.add_argument("--action-mode", default="absolute", choices=["absolute", "slot_relative"])

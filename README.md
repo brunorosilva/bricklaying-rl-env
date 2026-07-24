@@ -84,15 +84,23 @@ it before releasing** — so impact velocity is an *emergent consequence of the 
 chosen number. It was meant to make precision *harder* (you have to learn a gentle release).
 
 It did the opposite — and this is the strongest result in the project. Below, `robot11`
-completes an **8×5 wall it never trained on**, bricks dropping from the top:
+completes an **8×5 wall it never trained on** (the mobile gantry rides the rail; the tool
+drops each brick from the top):
 
-![robot11 completing a held-out 8×5 wall via drop-controlled placement](media/robot11_drop.gif)
+![robot11 completing a held-out 8×5 wall via drop-controlled placement](media/robot11_8x5.gif)
 
 | held-out wall | fill | completes | within ±3mm | mean error |
 |---|---|---|---|---|
 | 4×3 / 6×4 | 1.00 | ✅ 100% | **100%** | 0.5mm |
 | **8×5** (robot10 couldn't finish) | 1.00 | ✅ **100%** | **100%** | 1.0mm |
-| 10×6 (extrapolation) | 0.86 | 60% | 84% | 0.9mm |
+| 10×6 (extrapolation) | 0.86 | ~60% | 84% | 0.9mm |
+
+...but push it to a **10×6 wall — bigger than anything it trained on — and it fails in a
+gloriously honest way**: it barely moves and just *frantically drops ~200 bricks* from the
+top into the ~65% of the wall it can reach, most bouncing off. Generalization has an edge,
+and this is what it looks like:
+
+![robot11 failing on an out-of-distribution 10×6 wall](media/robot11_10x6_fail.gif)
 
 Sub-millimeter placement, and it now finishes the big walls the fixed-drop policy couldn't.
 The twist: the model releases from the **very top** (the *hardest* drop), not gently — and a

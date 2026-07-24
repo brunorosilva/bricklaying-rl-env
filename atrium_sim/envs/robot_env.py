@@ -471,7 +471,9 @@ class BrickLayerRobotEnv(gym.Env):
                 "placed": self.placements, "in tol": f"{self.report.frac_in_tol:.0%}",
                 "reward": f"{self.last_reward:+.3f}", "return": f"{self.episode_return:+.2f}",
             },
-            cursor=0, robot=(self.base_x, self.env_cfg.reach_mm),
+            cursor=0,
+            robot=(self.base_x, self.env_cfg.reach_mm,
+                   COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm),
         )
         if self.frame_sink is not None and frame is not None:
             self.frame_sink.append(frame)

@@ -34,6 +34,9 @@ TERRACOTTA = (178, 92, 62)
 STRAY = (90, 45, 40)
 HUD_TEXT = (225, 225, 220)
 LABEL = (200, 205, 215)
+ROBOT = (90, 170, 220)        # mobile gantry body
+ROBOT_DARK = (60, 120, 165)
+ROBOT_TOOL = (240, 200, 80)   # the descending tool / gripper
 
 
 def _quality_color(d: float, in_tol: bool) -> tuple[int, int, int]:
@@ -94,7 +97,7 @@ class PygameRenderer:
     # --- main draw --------------------------------------------------------------
 
     def draw(self, poses: list[BrickPose], report, hud: dict, cursor: int,
-             robot: tuple[float, float] | None = None) -> np.ndarray | None:
+             robot: tuple | None = None) -> np.ndarray | None:
         pg = self.pygame
         surf = self.surface
         surf.fill(BG)
@@ -105,16 +108,15 @@ class PygameRenderer:
             surf, GROUND, pg.Rect(0, gy0, self.w_px, self.h_px - gy0)
         )
 
-        # mobile robot: shaded reach window + base marker on the ground
+        # mobile robot: shaded reach window (behind everything; the body is drawn
+        # on top after the bricks so it reads clearly)
         if robot is not None:
-            base_x, reach = robot
+            base_x, reach = robot[0], robot[1]
             lx, _ = self._to_px(base_x - reach, 0)
             rx, _ = self._to_px(base_x + reach, 0)
             band = pg.Surface((max(1, rx - lx), self.h_px - gy0), pg.SRCALPHA)
-            band.fill((240, 200, 80, 26))
+            band.fill((240, 200, 80, 20))
             surf.blit(band, (lx, gy0))
-            bx, _ = self._to_px(base_x, 0)
-            pg.draw.polygon(surf, NEXT_SLOT, [(bx, gy0 - 16), (bx - 9, gy0), (bx + 9, gy0)])
 
         # ghost blueprint + next expected slot
         matched_ids = {m.target_id for m in report.matches}
@@ -150,6 +152,10 @@ class PygameRenderer:
                 lx, ly = self._to_px(p.x, p.y + h / 2 + 14)
                 surf.blit(label, (lx - label.get_width() / 2, ly))
 
+        # mobile-robot body (drawn on top so it's clearly visible)
+        if robot is not None:
+            self._draw_robot_body(robot, poses)
+
         # HUD
         pg.draw.rect(surf, (18, 19, 24), pg.Rect(0, 0, self.w_px, HUD_H))
         text = "   ".join(f"{k}: {v}" for k, v in hud.items())
@@ -164,6 +170,42 @@ class PygameRenderer:
 
         frame = np.transpose(pg.surfarray.array3d(surf), (1, 0, 2))
         return frame
+
+    def _draw_robot_body(self, robot: tuple, poses: list[BrickPose]) -> None:
+        """A mobile gantry: wheeled chassis on the rail, a mast, a top beam spanning
+        the reach, and a tool that descends from the beam to the brick being placed
+        (so a high release visibly drops from up top)."""
+        pg = self.pygame
+        surf = self.surface
+        base_x, reach = robot[0], robot[1]
+        gantry_y = robot[2] if len(robot) > 2 and robot[2] else (H_MAX + 60.0)
+
+        bx, gy0 = self._to_px(base_x, 0.0)
+        _, beam_py = self._to_px(base_x, gantry_y)
+        bx, gy0, beam_py = int(bx), int(gy0), int(beam_py)
+
+        # top beam spanning the reach window
+        half = int(reach * SCALE)
+        pg.draw.line(surf, ROBOT, (bx - half, beam_py), (bx + half, beam_py), 5)
+        # vertical mast up the middle
+        pg.draw.line(surf, ROBOT, (bx, gy0 - 10), (bx, beam_py), 6)
+        # wheeled chassis on the rail
+        pg.draw.rect(surf, ROBOT_DARK, pg.Rect(bx - 26, gy0 - 15, 52, 15), border_radius=4)
+        for wx in (bx - 15, bx + 15):
+            pg.draw.circle(surf, (28, 30, 36), (wx, gy0), 6)
+            pg.draw.circle(surf, ROBOT, (wx, gy0), 6, 2)
+
+        # tool: descends from the beam to the current brick (the last-spawned pose),
+        # clamped into the reach window — shows how high the release was
+        if poses:
+            p = poses[-1]
+            tool_x = min(max(p.x, base_x - reach), base_x + reach)
+            tpx, _ = self._to_px(tool_x, 0.0)
+            _, tpy = self._to_px(0.0, p.y + brick_face(p.kind)[1] / 2)
+            tpx, tpy = int(tpx), int(tpy)
+            pg.draw.line(surf, ROBOT, (tpx, beam_py), (tpx, beam_py + 4), 8)  # trolley on beam
+            pg.draw.line(surf, ROBOT_TOOL, (tpx, beam_py), (tpx, tpy), 3)      # descending tool
+            pg.draw.circle(surf, ROBOT_TOOL, (tpx, tpy), 5)                    # gripper head
 
     def close(self):
         if self.window is not None:
