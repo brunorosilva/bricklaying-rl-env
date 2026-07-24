@@ -195,14 +195,39 @@ webviz/ + frontend/   Next.js replay viewer (spawns a fresh Python episode per r
 tests/                reward worked-example pin, physics validation, PPO smoke, robot env
 ```
 
+## Facade plans from images (VLM)
+
+Any photo of a brick building → a buildable plan. A single Gemini vision call does the
+**perception** — it reads the front elevation as a grid of 220mm × 60mm modules and
+locates the openings — and a **deterministic tiler** (`atrium_sim/facade.py`) carves the
+remaining brickwork into non-overlapping running-bond panels. The model is never asked to
+produce a valid tiling (it can't); it only has to see the building.
+
+```bash
+uv run python -m vlm.plan_from_image <image-url-or-path> --name colonial --render
+# -> plans/colonial.json (the FacadePlan) + plans/colonial_vlm_raw.json (the raw response)
+#    + media/colonial_facade.png (elevation)
+```
+
+![Gemini-perceived facade elevation](media/colonial_facade.png)
+
+On a colonial-house photo, Gemini returned a 32×48 grid with 5 openings — correctly
+tagging the **arched picture window**, the **entry door**, and three windows, and flagging
+the roof/gables/porch as non-brick — which the tiler turned into 13 valid panels (855
+bricks). It's an *approximation*, not a survey, but a cohesive, structured, buildable one.
+Each panel is a `Blueprint` the same audit/render/oracle consume, so the facade plan feeds
+straight into the rest of the pipeline.
+
 ## Roadmap (this is not a closed-off project)
 
 - ~~Model-controlled drop height~~ ✅ **done** (see above) — and it's now the best result.
   Open thread: pin down *why* a hard drop yields sub-mm placement (a clean ablation:
   same policy, forced-gentle vs forced-hard release, to separate physics from learning).
+- ~~Image/VLM → buildable plan~~ ✅ **v1 done** (facade section above). Next: openings +
+  lintels in the *env* so the robot actually builds a facade panel (window void included).
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
-- Image/VLM observations, GRPO (`Agent(critic=False)` seam is already in place).
+- GRPO (`Agent(critic=False)` seam is already in place).
 
 ## License
 
