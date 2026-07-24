@@ -128,6 +128,25 @@ def test_prefill_is_stable_and_completable():
     env.close()
 
 
+def test_fall_off_edge():
+    """fall_off_edge on: commanding a move further off an edge topples the gantry
+    (terminates). Off (default): the move just clamps and the episode continues."""
+    mv_left = (int(Mode.MOVE_LEFT), np.array([0.0, 0.0], np.float32))
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(fall_off_edge=True, random_start=False)
+    env.reset(seed=1, options={"spec": WallSpec(4, 3)})
+    _, _, term, _, info = env.step(mv_left)  # at base=0, move further left -> fall
+    assert term and env.unwrapped._fell and info["metrics"]["fell"] == 1.0
+    env.close()
+
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(fall_off_edge=False, random_start=False)
+    env.reset(seed=1, options={"spec": WallSpec(4, 3)})
+    _, _, term, _, _ = env.step(mv_left)
+    assert not term and not env.unwrapped._fell and env.unwrapped.base_x == 0.0
+    env.close()
+
+
 def test_release_height_monotone_and_endpoints():
     """box[1]=+1 -> gentle height; box[1]=-1 -> arm top; strictly monotone between."""
     from atrium_sim.constants import COURSE_MM, SPAWN_DROP_MM

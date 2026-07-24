@@ -107,6 +107,10 @@ class RobotEnvConfig:
                                       # exact targets - the robot must COMPLETE a standing wall
                                       # rather than always build from scratch.
     prefill_max_frac: float = 0.7     # cap on the fraction of the wall pre-placed (random 1..this*n)
+    fall_off_edge: bool = False       # a real gantry rides a finite rail: if it's already at an
+                                      # end and commands a move further off that end, it drives
+                                      # off and topples -> the episode ends (charged fall_penalty).
+    fall_penalty: float = 1.0         # reward charged for driving off the end of the rail
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
@@ -163,6 +167,7 @@ class BrickLayerRobotEnv(gym.Env):
         self._release_y = None        # drop-control: last release height (for the renderer)
         self._arm_top_y = None
         self._fall_frac = 0.0         # drop-control: last normalized drop height (for the penalty)
+        self._fell = False            # drove off the end of the rail this episode
         self.halves_used = 0
         self.off_canvas = 0
         self.invalid = 0
@@ -216,25 +221,30 @@ class BrickLayerRobotEnv(gym.Env):
 
         # termination - all terminal paths final-settle + re-audit first
         terminated = False
-        dropped = prev_matched - len(self.report.matches)
-        collapse = dropped >= max(cfg.collapse_min_bricks, int(np.ceil(cfg.collapse_frac * prev_matched)))
-        complete = not self.report.missing_targets
-        budget_out = self.steps >= self.budget
-
-        if collapse or complete or budget_out:
-            reward += self._final_settle_delta()
+        if self._fell:
+            # drove off the end of the rail -> the gantry topples off its track; episode
+            # ends immediately (the fall penalty was already charged in _do_move)
+            terminated = True
+        else:
+            dropped = prev_matched - len(self.report.matches)
+            collapse = dropped >= max(cfg.collapse_min_bricks, int(np.ceil(cfg.collapse_frac * prev_matched)))
             complete = not self.report.missing_targets
-            if collapse:
-                reward -= cfg.collapse_penalty
-                self._terminal_terms -= cfg.collapse_penalty
-                terminated = True
-            elif complete:
-                bonus = cfg.bonus_fill + (cfg.bonus_perfect if self.report.frac_in_tol == 1.0 else 0.0)
-                reward += bonus
-                self._terminal_terms += bonus
-                terminated = True
-            elif budget_out:
-                terminated = True
+            budget_out = self.steps >= self.budget
+
+            if collapse or complete or budget_out:
+                reward += self._final_settle_delta()
+                complete = not self.report.missing_targets
+                if collapse:
+                    reward -= cfg.collapse_penalty
+                    self._terminal_terms -= cfg.collapse_penalty
+                    terminated = True
+                elif complete:
+                    bonus = cfg.bonus_fill + (cfg.bonus_perfect if self.report.frac_in_tol == 1.0 else 0.0)
+                    reward += bonus
+                    self._terminal_terms += bonus
+                    terminated = True
+                elif budget_out:
+                    terminated = True
 
         self.last_reward = float(reward)
         self.episode_return += float(reward)
@@ -298,6 +308,16 @@ class BrickLayerRobotEnv(gym.Env):
         return release_y
 
     def _do_move(self, mode: Mode) -> float:
+        # a real gantry rides a finite rail: if it's already at an end and commands a
+        # move further off that end, it drives off and topples (episode ends).
+        at_left = self.base_x <= 1.0
+        at_right = self.base_x >= self.blueprint.length - 1.0
+        off_edge = (mode == Mode.MOVE_LEFT and at_left) or (mode == Mode.MOVE_RIGHT and at_right)
+        if self.env_cfg.fall_off_edge and off_edge:
+            self._fell = True
+            self.moves += 1
+            self._terminal_terms -= self.env_cfg.fall_penalty
+            return -self.env_cfg.fall_penalty
         step = self.env_cfg.move_step_mm * (-1.0 if mode == Mode.MOVE_LEFT else 1.0)
         self.base_x = float(np.clip(self.base_x + step, 0.0, self.blueprint.length))
         self.moves += 1
@@ -496,6 +516,7 @@ class BrickLayerRobotEnv(gym.Env):
                 "episode_return": self.episode_return,
                 "placements": float(self.placements), "moves": float(self.moves),
                 "invalid": float(self.invalid), "steps": float(self.steps),
+                "fell": float(self._fell),
             }
         return info
 

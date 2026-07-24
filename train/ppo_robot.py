@@ -66,6 +66,7 @@ class Args:
                                     # is pushed toward realistic gentle placement (drop mode only)
     prefill_prob: float = 0.0   # fraction of episodes that start with a random partial structure
                                 # already built (the robot must complete a standing wall)
+    fall_off_edge: bool = False  # driving off the end of the rail topples the gantry (episode ends)
     suite: str = "robot"        # small walls (3-5 modules): completable, so it learns to
                                 # finish a course and stack levels (big walls are too long-horizon)
     eval_suite: str = "robot_eval"
@@ -81,7 +82,7 @@ class Args:
 
 def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
              drop_control: bool = False, drop_penalty_frac: float = 0.0,
-             prefill_prob: float = 0.0):
+             prefill_prob: float = 0.0, fall_off_edge: bool = False):
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
@@ -94,7 +95,8 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
         u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
                                     drop_control=drop_control,
                                     drop_penalty_frac=drop_penalty_frac,
-                                    prefill_prob=prefill_prob)
+                                    prefill_prob=prefill_prob,
+                                    fall_off_edge=fall_off_edge)
         # softer collapse/waste penalties so the agent is less "afraid" to attempt
         # the hard last bricks (top course, half-brick ends); precision plateau unchanged
         u.reward_cfg = type(u.reward_cfg)(
@@ -107,13 +109,15 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
 
 def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: float,
                    sigma_deg: float, random_start: bool, drop_control: bool = False,
-                   drop_penalty_frac: float = 0.0, prefill_prob: float = 0.0) -> dict:
+                   drop_penalty_frac: float = 0.0, prefill_prob: float = 0.0,
+                   fall_off_edge: bool = False) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
     u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
                                 drop_control=drop_control,
                                 drop_penalty_frac=drop_penalty_frac,
-                                prefill_prob=prefill_prob)  # match training
+                                prefill_prob=prefill_prob,
+                                fall_off_edge=fall_off_edge)  # match training
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
     policy = HybridAgentPolicy(agent)
     specs = _SUITES[suite]
@@ -164,7 +168,8 @@ def main(args: Args) -> dict:
 
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start,
-                  args.drop_control, args.drop_penalty_frac, args.prefill_prob)
+                  args.drop_control, args.drop_penalty_frac, args.prefill_prob,
+                  args.fall_off_edge)
          for _ in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
@@ -300,7 +305,7 @@ def main(args: Args) -> dict:
                        "mode_entropy": cat_ent.mean().item(), "approx_kl": approx_kl.item()}
 
         if args.eval_interval and update % args.eval_interval == 0:
-            last_eval = evaluate_robot(agent, args.eval_episodes, args.eval_suite, args.sigma_mm, args.sigma_deg, args.random_start, args.drop_control, args.drop_penalty_frac, args.prefill_prob)
+            last_eval = evaluate_robot(agent, args.eval_episodes, args.eval_suite, args.sigma_mm, args.sigma_deg, args.random_start, args.drop_control, args.drop_penalty_frac, args.prefill_prob, args.fall_off_edge)
             n_evals += 1
             for k, v in last_eval.items():
                 writer.add_scalar(f"eval/{k}", v, global_step)
@@ -314,7 +319,8 @@ def main(args: Args) -> dict:
                         random_start=args.random_start, c_reach=2.0,
                         drop_control=args.drop_control,
                         drop_penalty_frac=args.drop_penalty_frac,
-                        prefill_prob=args.prefill_prob)
+                        prefill_prob=args.prefill_prob,
+                        fall_off_edge=args.fall_off_edge)
                     genv.unwrapped.reward_cfg = type(genv.unwrapped.reward_cfg)(
                         sigma_mm=args.sigma_mm, sigma_deg=args.sigma_deg)
                     record_episode(genv, HybridAgentPolicy(agent),
