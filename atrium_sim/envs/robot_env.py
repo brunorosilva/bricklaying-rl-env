@@ -99,6 +99,9 @@ class RobotEnvConfig:
                                       # velocity is then an emergent consequence of the fall.
                                       # False => identical to before (fixed gentle drop).
     arm_margin_mm: float = DROP_ARM_MARGIN_MM   # arm "home" height above the wall top (drop mode)
+    drop_penalty_frac: float = 0.0    # drop mode: penalize the release HEIGHT (penalty ~
+                                      # fall_frac x this x r_scale/n) so slamming bricks from
+                                      # the top costs reward -> pushes toward gentle placement.
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
@@ -154,6 +157,7 @@ class BrickLayerRobotEnv(gym.Env):
         self._moves_since_place = 0   # consecutive MOVEs since the last brick placed (wander)
         self._release_y = None        # drop-control: last release height (for the renderer)
         self._arm_top_y = None
+        self._fall_frac = 0.0         # drop-control: last normalized drop height (for the penalty)
         self.halves_used = 0
         self.off_canvas = 0
         self.invalid = 0
@@ -261,7 +265,13 @@ class BrickLayerRobotEnv(gym.Env):
         self.off_canvas += len(removed)
         self.report = self._audit()
         self.last_disturbance = self._disturbance(pre, bid)
-        return potential(self.report, self.reward_cfg) - prev_phi
+        reward = potential(self.report, self.reward_cfg) - prev_phi
+        # penalize a high release (penalty ~ drop height ~ impact energy) so the model
+        # is pushed toward realistic gentle placement instead of slamming from the top
+        if release_y is not None and self.env_cfg.drop_penalty_frac > 0.0:
+            reward -= (self.env_cfg.drop_penalty_frac * self._fall_frac
+                       * self.reward_cfg.r_scale / self.blueprint.n_targets)
+        return reward
 
     def _release_height(self, course: int, box: np.ndarray) -> float:
         """Drop-control: box[1] in [-1,1] picks how far to lower the arm from its home
@@ -273,7 +283,11 @@ class BrickLayerRobotEnv(gym.Env):
         arm_top_y = COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm
         self._arm_top_y = arm_top_y
         release_y = gentle_y + (1.0 - lower_frac) * max(0.0, arm_top_y - gentle_y)
-        return float(np.clip(release_y, gentle_y, H_MAX + 120.0 - 1.0))
+        release_y = float(np.clip(release_y, gentle_y, H_MAX + 120.0 - 1.0))
+        # normalized drop height (0 gentle .. 1 released from the top) for the penalty
+        span = max(1.0, arm_top_y - gentle_y)
+        self._fall_frac = float(np.clip((release_y - gentle_y) / span, 0.0, 1.0))
+        return release_y
 
     def _do_move(self, mode: Mode) -> float:
         step = self.env_cfg.move_step_mm * (-1.0 if mode == Mode.MOVE_LEFT else 1.0)

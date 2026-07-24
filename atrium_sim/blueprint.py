@@ -137,6 +137,7 @@ ROBOT_SPECS: tuple[WallSpec, ...] = tuple(
 # across wall sizes - the axis where the small-only "robot" suite doesn't transfer.
 ROBOT_BIG_EVAL_SPECS: tuple[WallSpec, ...] = (
     WallSpec(4, 3), WallSpec(6, 4), WallSpec(8, 5),
+    WallSpec(9, 5), WallSpec(10, 6),   # harder held-out cases (beyond the 3-8 module range)
 )
 ROBOT_BIG_SPECS: tuple[WallSpec, ...] = tuple(
     WallSpec(m, c)
