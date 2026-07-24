@@ -76,6 +76,34 @@ the network.
 
 ---
 
+## Latest: model-controlled drop height (`robot11`)
+
+The next task hands the physics a bigger role. Instead of each brick appearing just above
+its slot, the arm **homes at the top of the wall** and the model chooses **how far to lower
+it before releasing** — so impact velocity is an *emergent consequence of the fall*, not a
+chosen number. It was meant to make precision *harder* (you have to learn a gentle release).
+
+It did the opposite — and this is the strongest result in the project. Below, `robot11`
+completes an **8×5 wall it never trained on**, bricks dropping from the top:
+
+![robot11 completing a held-out 8×5 wall via drop-controlled placement](media/robot11_drop.gif)
+
+| held-out wall | fill | completes | within ±3mm | mean error |
+|---|---|---|---|---|
+| 4×3 / 6×4 | 1.00 | ✅ 100% | **100%** | 0.5mm |
+| **8×5** (robot10 couldn't finish) | 1.00 | ✅ **100%** | **100%** | 1.0mm |
+| 10×6 (extrapolation) | 0.86 | 60% | 84% | 0.9mm |
+
+Sub-millimeter placement, and it now finishes the big walls the fixed-drop policy couldn't.
+The twist: the model releases from the **very top** (the *hardest* drop), not gently — and a
+5× precision jump over the fixed-drop baseline appears at equal training budget, so the drop
+control is the cause, not just more steps. **Why** a hard drop yields sub-mm placement is
+still an open question I'm investigating (seating in the fully-packed course vs. a cleaner
+policy gradient from activating the release dimension) — noted here honestly rather than
+dressed up.
+
+---
+
 ## The environment in 30 seconds
 
 - **One step = one brick.** For the base env, the action is 2 floats in [-1, 1]: *where
@@ -160,14 +188,12 @@ tests/                reward worked-example pin, physics validation, PPO smoke, 
 
 ## Roadmap (this is not a closed-off project)
 
-- **Model-controlled drop height (next).** The arm resets at the top of the wall and the
-  model chooses how far to lower it before releasing — impact velocity becomes an
-  *emergent consequence* of the drop, so precision has to be learned through the physics
-  rather than handed out by the reward.
+- ~~Model-controlled drop height~~ ✅ **done** (see above) — and it's now the best result.
+  Open thread: pin down *why* a hard drop yields sub-mm placement (a clean ablation:
+  same policy, forced-gentle vs forced-hard release, to separate physics from learning).
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
-- Precision curriculum (anneal the reward tolerance), image/VLM observations, GRPO
-  (`Agent(critic=False)` seam is already in place).
+- Image/VLM observations, GRPO (`Agent(critic=False)` seam is already in place).
 
 ## License
 
