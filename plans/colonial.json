@@ -1,0 +1,136 @@
+{
+  "image_ref": "https://media.istockphoto.com/id/171302239/photo/colonial-house.jpg?s=612x612&w=0&k=20&c=728Aj3qj1UED-twfeCu1IT8eD5rIbSr5fVTda-WwgLM=",
+  "grid_cols": 32,
+  "grid_rows": 48,
+  "openings": [
+    {
+      "kind": "arched_window",
+      "col": 2,
+      "row": 8,
+      "n_cols": 7,
+      "n_rows": 38
+    },
+    {
+      "kind": "window",
+      "col": 4,
+      "row": 0,
+      "n_cols": 3,
+      "n_rows": 5
+    },
+    {
+      "kind": "door",
+      "col": 11,
+      "row": 0,
+      "n_cols": 4,
+      "n_rows": 35
+    },
+    {
+      "kind": "window",
+      "col": 16,
+      "row": 8,
+      "n_cols": 7,
+      "n_rows": 30
+    },
+    {
+      "kind": "window",
+      "col": 24,
+      "row": 8,
+      "n_cols": 6,
+      "n_rows": 30
+    }
+  ],
+  "panels": [
+    {
+      "n_modules": 4,
+      "n_courses": 8,
+      "origin_col": 0,
+      "origin_row": 0,
+      "label": ""
+    },
+    {
+      "n_modules": 4,
+      "n_courses": 8,
+      "origin_col": 7,
+      "origin_row": 0,
+      "label": ""
+    },
+    {
+      "n_modules": 17,
+      "n_courses": 8,
+      "origin_col": 15,
+      "origin_row": 0,
+      "label": ""
+    },
+    {
+      "n_modules": 3,
+      "n_courses": 3,
+      "origin_col": 4,
+      "origin_row": 5,
+      "label": ""
+    },
+    {
+      "n_modules": 2,
+      "n_courses": 40,
+      "origin_col": 0,
+      "origin_row": 8,
+      "label": ""
+    },
+    {
+      "n_modules": 2,
+      "n_courses": 40,
+      "origin_col": 9,
+      "origin_row": 8,
+      "label": ""
+    },
+    {
+      "n_modules": 1,
+      "n_courses": 40,
+      "origin_col": 15,
+      "origin_row": 8,
+      "label": ""
+    },
+    {
+      "n_modules": 1,
+      "n_courses": 40,
+      "origin_col": 23,
+      "origin_row": 8,
+      "label": ""
+    },
+    {
+      "n_modules": 2,
+      "n_courses": 40,
+      "origin_col": 30,
+      "origin_row": 8,
+      "label": ""
+    },
+    {
+      "n_modules": 4,
+      "n_courses": 13,
+      "origin_col": 11,
+      "origin_row": 35,
+      "label": ""
+    },
+    {
+      "n_modules": 7,
+      "n_courses": 10,
+      "origin_col": 16,
+      "origin_row": 38,
+      "label": ""
+    },
+    {
+      "n_modules": 6,
+      "n_courses": 10,
+      "origin_col": 24,
+      "origin_row": 38,
+      "label": ""
+    },
+    {
+      "n_modules": 7,
+      "n_courses": 2,
+      "origin_col": 2,
+      "origin_row": 46,
+      "label": ""
+    }
+  ],
+  "notes": "Roof, gables above the arched window and door, and the porch/balcony structure are non-brick regions."
+}

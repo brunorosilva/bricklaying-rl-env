@@ -1,0 +1,42 @@
+{
+  "grid_cols": 32,
+  "grid_rows": 48,
+  "openings": [
+    {
+      "kind": "arched_window",
+      "col": 2,
+      "row": 8,
+      "n_cols": 7,
+      "n_rows": 38
+    },
+    {
+      "kind": "window",
+      "col": 4,
+      "row": 0,
+      "n_cols": 3,
+      "n_rows": 5
+    },
+    {
+      "kind": "door",
+      "col": 11,
+      "row": 0,
+      "n_cols": 4,
+      "n_rows": 35
+    },
+    {
+      "kind": "window",
+      "col": 16,
+      "row": 8,
+      "n_cols": 7,
+      "n_rows": 30
+    },
+    {
+      "kind": "window",
+      "col": 24,
+      "row": 8,
+      "n_cols": 6,
+      "n_rows": 30
+    }
+  ],
+  "notes": "Roof, gables above the arched window and door, and the porch/balcony structure are non-brick regions."
+}
