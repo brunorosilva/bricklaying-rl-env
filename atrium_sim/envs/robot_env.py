@@ -29,7 +29,6 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from atrium_sim import observations
 from atrium_sim.blueprint import (
     Blueprint,
     BrickKind,
@@ -44,7 +43,7 @@ from atrium_sim.constants import (
     DROP_ARM_MARGIN_MM,
     FINAL_SETTLE_SUBSTEPS,
     H_MAX,
-    L_MAX,
+    MATCH_GATE_RAD,
     MAX_SETTLE_SUBSTEPS,
     MOVE_COST_FRAC,
     MOVE_STEP_MM,
@@ -56,8 +55,12 @@ from atrium_sim.constants import (
 from atrium_sim.physics import PhysicsWorld
 from atrium_sim.reward import AuditReport, RewardConfig, audit, potential
 
-ROBOT_GLOBALS = 6  # extra features appended to the base observation
-OBS_DIM = observations.OBS_DIM + ROBOT_GLOBALS
+# The mobile robot observes a compact SENSOR vector (not the blueprint grid): readings that
+# are the env's reaction - proximity to the next target, feedback from the last placement,
+# rail position/edges, direction to work, progress. Size-agnostic: identical shape for a
+# 4x3 wall or a 40-course pier. See _obs().
+_ERR_NORM_MM = 30.0   # dx/dy sensor normaliser (full resolution around +-3mm, clips at +-30)
+OBS_DIM = 20
 
 
 class Mode(IntEnum):
@@ -168,6 +171,8 @@ class BrickLayerRobotEnv(gym.Env):
         self._arm_top_y = None
         self._fall_frac = 0.0         # drop-control: last normalized drop height (for the penalty)
         self._fell = False            # drove off the end of the rail this episode
+        self._last_place = None       # (dx, dy, dtheta, in_tol) of the last placed brick, for the
+                                      # placement-feedback sensors (None until the first placement)
         self.halves_used = 0
         self.off_canvas = 0
         self.invalid = 0
@@ -282,6 +287,9 @@ class BrickLayerRobotEnv(gym.Env):
         removed = self._settle(self.env_cfg.max_settle_substeps)
         self.off_canvas += len(removed)
         self.report = self._audit()
+        # placement-feedback sensor: how the just-placed brick landed (None if it strayed)
+        lm = next((m for m in self.report.matches if m.brick_id == bid), None)
+        self._last_place = (lm.dx, lm.dy, lm.dtheta, lm.in_tol) if lm else None
         self.last_disturbance = self._disturbance(pre, bid)
         reward = potential(self.report, self.reward_cfg) - prev_phi
         # penalize a high release (penalty ~ drop height ~ impact energy) so the model
@@ -469,35 +477,60 @@ class BrickLayerRobotEnv(gym.Env):
         return max(moved, default=0.0)
 
     def _obs(self) -> np.ndarray:
-        matched_ids = {m.target_id for m in self.report.matches}
-        cursor = min((t.course for t in self.blueprint.targets if t.tid not in matched_ids),
-                     default=self.blueprint.n_courses - 1)
-        course = self.blueprint.course_targets(cursor)
+        """A compact SENSOR vector (OBS_DIM scalars) - the env's reaction, not the grid.
+        Everything is normalized relative to the CURRENT wall, so the shape and meaning are
+        identical for a 4x3 wall or a 40-course pier (size-agnostic)."""
+        bp = self.blueprint
+        length = max(1.0, bp.length)
+        r = self.report
+        matched_ids = {m.target_id for m in r.matches}
         reachable = self._reachable_open()
-        next_t = self._next_place_target()
-        g = observations.GlobalState(
-            cursor=cursor,
-            course_fill_frac=sum(1 for t in course if t.tid in matched_ids) / len(course),
-            bricks_left=max(0, self.budget - self.steps),
-            budget=self.budget,
-            cuts=self.halves_used,
-            n_strays=len(self.report.stray_bricks),
-            last_disturbance_mm=self.last_disturbance,
-            next_slot_x=next_t.x if next_t else 0.0,
-            next_slot_is_half=1.0 if (next_t and next_t.kind == BrickKind.HALF) else 0.0,
-        )
-        base = observations.encode(self.blueprint, self.report, g)
-        nearest = self._nearest_open()
-        signed_dist = ((nearest.x - self.base_x) / L_MAX) if nearest else 0.0
-        robot = np.array([
-            self.base_x / L_MAX,
-            self.env_cfg.reach_mm / L_MAX,
-            len(reachable) / self.blueprint.n_targets,
-            float(np.clip(signed_dist, -1.0, 1.0)),
-            1.0 if self.base_x <= 1.0 else 0.0,
-            1.0 if self.base_x >= self.blueprint.length - 1.0 else 0.0,
+        missing = max(1, len(r.missing_targets))
+        next_t = self._next_place_target()          # leftmost reachable placeable, or None
+        nearest = self._nearest_open()               # nearest unplaced work (any direction), or None
+
+        # active course completion
+        cursor = min((t.course for t in bp.targets if t.tid not in matched_ids),
+                     default=bp.n_courses - 1)
+        course = bp.course_targets(cursor)
+        course_fill = sum(1 for t in course if t.tid in matched_ids) / max(1, len(course))
+
+        if next_t is not None:
+            next_dx = np.clip((next_t.x - self.base_x) / self.env_cfg.reach_mm, -1.0, 1.0)
+            next_course = next_t.course / max(1, bp.n_courses)
+            next_half = 1.0 if next_t.kind == BrickKind.HALF else 0.0
+        else:
+            next_dx = next_course = next_half = 0.0
+        nearest_dx = np.clip((nearest.x - self.base_x) / length, -1.0, 1.0) if nearest else 0.0
+        lp = self._last_place  # (dx, dy, dtheta, in_tol) or None
+
+        sensors = np.array([
+            # --- rail position ---
+            self.base_x / length,                                   # where along the rail
+            1.0 if self.base_x <= 1.0 else 0.0,                     # at the left end
+            1.0 if self.base_x >= length - 1.0 else 0.0,            # at the right end
+            min(self.env_cfg.reach_mm / length, 1.0),              # reach vs wall width
+            # --- work sensing ---
+            1.0 if reachable else 0.0,                              # is there a target in reach
+            next_dx,                                                # next target x, relative to arm
+            next_course,                                            # next target height (fraction)
+            next_half,                                              # next target is a half brick
+            nearest_dx,                                             # direction+dist to nearest work
+            min(len(reachable) / missing, 1.0),                    # how much of what's left is in reach
+            # --- placement feedback (reaction to the last brick) ---
+            np.clip(lp[0] / _ERR_NORM_MM, -1.0, 1.0) if lp else 0.0,
+            np.clip(lp[1] / _ERR_NORM_MM, -1.0, 1.0) if lp else 0.0,
+            np.clip(lp[2] / MATCH_GATE_RAD, -1.0, 1.0) if lp else 0.0,
+            (1.0 if lp[3] else 0.0) if lp else 0.0,                 # last brick within tolerance
+            min(self.last_disturbance / _ERR_NORM_MM, 1.0),        # did it disturb neighbors
+            # --- progress ---
+            r.frac_filled,
+            course_fill,
+            max(0, self.budget - self.steps) / max(1, self.budget),
+            len(r.stray_bricks) / max(1, bp.n_targets),
+            min(self._moves_since_place / (2 * max(1, self.env_cfg.wander_threshold)), 1.0),
         ], dtype=np.float32)
-        return np.clip(np.concatenate([base, robot]), -1.0, 1.0)
+        return np.clip(sensors, -1.0, 1.0)
 
     def _info(self, terminal: bool) -> dict[str, Any]:
         r = self.report

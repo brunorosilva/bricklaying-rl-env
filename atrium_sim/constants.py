@@ -84,6 +84,9 @@ MOVE_COST_FRAC = 0.05       # per-move cost as a fraction of one perfect brick's
 INVALID_PLACE_FRAC = 0.05   # cost of a PLACE with nothing reachable to place
 
 # --- Observation / eval maxima (10 modules x 6 courses) ---
+# These bound the base BrickLayer env's fixed C_MAX x S_MAX slot grid. The mobile robot
+# no longer uses the grid (it observes a compact SENSOR vector, see robot_env), so these
+# caps do not constrain the robot's wall sizes.
 L_MAX = 2200.0
 H_MAX = 360.0
 S_MAX = 11   # slots per course, max (10-module odd course: 2 halves + 9 fulls)

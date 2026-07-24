@@ -19,7 +19,7 @@ def test_check_env():
 def test_obs_shape_and_bounds():
     env = gym.make("atrium_sim/BrickLayer-v0")
     obs, _ = env.reset(seed=3)
-    assert obs.shape == (OBS_DIM,) == (538,)
+    assert obs.shape == (OBS_DIM,)
     for _ in range(5):
         obs, *_ = env.step(env.action_space.sample())
         assert obs.dtype == np.float32

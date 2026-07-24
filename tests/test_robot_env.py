@@ -24,10 +24,25 @@ def test_check_env():
 def test_obs_shape_and_bounds():
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     obs, _ = env.reset(seed=1)
-    assert obs.shape == (OBS_DIM,) == (544,)
+    assert obs.shape == (OBS_DIM,)
     for _ in range(10):
         obs, *_ = env.step(env.action_space.sample())
         assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+    env.close()
+
+
+def test_sensor_obs_is_compact_and_size_agnostic():
+    """The robot observes a small fixed SENSOR vector (not the blueprint grid), so its
+    shape is identical for a tiny wall and a 40-course facade pier."""
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    assert OBS_DIM < 64  # compact sensor vector, not a C_MAX*S_MAX grid
+    shapes = set()
+    for spec in (WallSpec(4, 3), WallSpec(2, 40), WallSpec(17, 8)):
+        obs, _ = env.reset(seed=1, options={"spec": spec})
+        assert obs.shape == (OBS_DIM,)
+        assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+        shapes.add(obs.shape)
+    assert len(shapes) == 1  # size-agnostic
     env.close()
 
 
@@ -98,7 +113,7 @@ def test_drop_control_shapes_unchanged():
     env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(drop_control=True)
     obs, _ = env.reset(seed=1)
     assert env.action_space.spaces[1].shape == (2,)
-    assert obs.shape == (OBS_DIM,) == (544,)
+    assert obs.shape == (OBS_DIM,)
     env.close()
 
 

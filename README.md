@@ -118,6 +118,13 @@ dressed up.
 - **One step = one brick.** For the base env, the action is 2 floats in [-1, 1]: *where
   along the wall* and *which brick*. The row is automatic (lowest incomplete course);
   gravity does the rest. The robot env adds movement (a discrete move/place head).
+- **The robot sees sensors, not the blueprint.** Earlier the policy read a padded
+  *slot grid* of the whole wall — a "god's-eye view" that doesn't scale (a facade pier is
+  40 courses tall). The mobile robot now observes a compact **~20-scalar sensor vector**:
+  the environment's *reaction* — is a target in reach and where (relative to the arm), how
+  the last brick landed, which way the nearest work is, am I at a rail end, how much is
+  left. No grid, so it's **size-agnostic** — the same policy reads a 4×3 wall and a
+  40-course pier identically. (A Mario-Kart agent reads track signals, not every pixel.)
 - **The reward IS the audit.** A pure function `audit(wall, blueprint)` scores the
   settled geometry: full credit inside ±3mm/±0.5°, smooth Gaussian decay outside, waste
   charges for strays and toppled bricks. The per-step reward is the *change* in wall
@@ -215,8 +222,21 @@ On a colonial-house photo, Gemini returned a 32×48 grid with 5 openings — cor
 tagging the **arched picture window**, the **entry door**, and three windows, and flagging
 the roof/gables/porch as non-brick — which the tiler turned into 13 valid panels (855
 bricks). It's an *approximation*, not a survey, but a cohesive, structured, buildable one.
-Each panel is a `Blueprint` the same audit/render/oracle consume, so the facade plan feeds
-straight into the rest of the pipeline.
+
+### From plan to process: the robot fills it in
+
+A `FacadePlan` isn't just a picture — it's a **process**: an ordered set of panels, each a
+`Blueprint` the robot lays brick by brick. The intended loop is
+**`image → plan → build → audit-score`**. This is precisely what the **sensor observation**
+unlocks: because the robot reads sensors instead of a fixed-size grid, *one* policy that
+lays a 4×3 wall can also lay a 40-course facade pier — the plan's panels no longer have to
+fit any observation cap. So the VLM turns a photo into a plan, and the robot fills that plan
+in, panel by panel, the same way it fills a wall.
+
+Honest gap between here and a laid facade: *representable* isn't *buildable*. A 2-wide ×
+40-tall pier is a free-standing tower that topples under gravity — real facade piers only
+stand tied into the bands around them. The next env step (roadmap) is **openings + lintels +
+connected panels**; then the robot fills a whole facade the way it fills a single wall.
 
 ## Roadmap (this is not a closed-off project)
 

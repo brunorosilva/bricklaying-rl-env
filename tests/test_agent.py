@@ -6,7 +6,8 @@ import torch
 from train.agent import Agent, CheckpointPolicy, save_checkpoint
 from train.ppo import compute_gae
 
-OBS_DIM, ACT_DIM = 538, 2
+from atrium_sim.observations import OBS_DIM  # noqa: E402
+ACT_DIM = 2
 
 
 def test_action_and_value_shapes():

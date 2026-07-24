@@ -7,7 +7,8 @@ import torch
 from train.agent import Agent, CheckpointPolicy, save_checkpoint
 from train.architectures import ARCHITECTURES
 
-OBS_DIM, ACT_DIM = 538, 2
+from atrium_sim.observations import OBS_DIM  # noqa: E402
+ACT_DIM = 2
 
 
 @pytest.mark.parametrize("arch", ARCHITECTURES)
