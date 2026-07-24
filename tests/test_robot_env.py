@@ -102,6 +102,32 @@ def test_drop_control_shapes_unchanged():
     env.close()
 
 
+def test_prefill_off_by_default():
+    """Default (prefill_prob=0): the wall starts empty."""
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.reset(seed=0, options={"spec": WallSpec(4, 3)})
+    assert len(env.unwrapped.report.matches) == 0
+    env.close()
+
+
+def test_prefill_is_stable_and_completable():
+    """A prefilled episode starts with a random support-closed partial structure (some
+    but not all bricks) that the oracle can finish - i.e. prefill yields valid walls."""
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(prefill_prob=1.0, prefill_max_frac=0.6)
+    u = env.unwrapped
+    env.reset(seed=0, options={"spec": WallSpec(6, 4)})
+    pre = len(u.report.matches)
+    assert 0 < pre < u.blueprint.n_targets  # some, not all, pre-placed
+    policy = RobotOraclePolicy(env)
+    done = False
+    while not done:
+        _, _, term, trunc, info = env.step(policy.act(u._obs()))
+        done = term or trunc
+    assert info["metrics"]["frac_filled"] == 1.0  # oracle completes the standing wall
+    env.close()
+
+
 def test_release_height_monotone_and_endpoints():
     """box[1]=+1 -> gentle height; box[1]=-1 -> arm top; strictly monotone between."""
     from atrium_sim.constants import COURSE_MM, SPAWN_DROP_MM

@@ -102,6 +102,11 @@ class RobotEnvConfig:
     drop_penalty_frac: float = 0.0    # drop mode: penalize the release HEIGHT (penalty ~
                                       # fall_frac x this x r_scale/n) so slamming bricks from
                                       # the top costs reward -> pushes toward gentle placement.
+    prefill_prob: float = 0.0         # probability an episode STARTS with a random, support-closed
+                                      # (physically stable) partial structure already built, at
+                                      # exact targets - the robot must COMPLETE a standing wall
+                                      # rather than always build from scratch.
+    prefill_max_frac: float = 0.7     # cap on the fraction of the wall pre-placed (random 1..this*n)
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
@@ -167,7 +172,10 @@ class BrickLayerRobotEnv(gym.Env):
         self._step_costs = 0.0
         self._terminal_terms = 0.0
         self._completed_courses = 0
+        if self.env_cfg.prefill_prob > 0.0 and float(self.np_random.random()) < self.env_cfg.prefill_prob:
+            self._random_prefill()
         self.report = self._audit()
+        self._completed_courses = self._completed_course_count()  # prefilled courses don't re-award
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
@@ -302,6 +310,30 @@ class BrickLayerRobotEnv(gym.Env):
         if self._moves_since_place >= self.env_cfg.wander_threshold:
             cost += self.env_cfg.wander_penalty_frac * scale
         return -cost
+
+    def _random_prefill(self) -> None:
+        """Pre-place a random, support-closed (physically stable) partial structure at
+        exact target positions, so the robot has to COMPLETE an already-standing wall.
+        Grow the set from the base: repeatedly add a random target whose supports are
+        all already placed, up to a random fraction of the wall. Spawned directly (not
+        via _do_place) so it doesn't count as an agent placement."""
+        n = self.blueprint.n_targets
+        count = int(self.np_random.integers(1, max(1, int(self.env_cfg.prefill_max_frac * n)) + 1))
+        placed: set[int] = set()
+        while len(placed) < count:
+            frontier = [
+                t for t in self.blueprint.targets
+                if t.tid not in placed
+                and (t.course == 0 or all(s in placed for s in self._support.get(t.tid, [])))
+            ]
+            if not frontier:
+                break
+            placed.add(frontier[int(self.np_random.integers(len(frontier)))].tid)
+        # spawn bottom-up (targets are ordered by course, slot) at exact targets, then settle
+        for t in self.blueprint.targets:
+            if t.tid in placed:
+                self.world.spawn_brick(t.x, t.kind, t.course)
+        self._settle(self.env_cfg.final_settle_substeps)
 
     # --- reachability ---------------------------------------------------------
 
