@@ -67,12 +67,13 @@ wandered.
 
 ### Architecture is *not* the lever
 
-Two architecture bake-offs (10 backbones: MLP variants, CNN, attention) reached the same
-verdict. On the free-placement task every architecture plateaued at ~0%. On the robot
-task the plain MLPs cleanly solved it while the **transformers couldn't even learn the
-base task** (attention flatlined at 0% fill, and ran 10–20× slower on this
-sample-starved, physics-bound env). The bottleneck was always the *problem shaping*, not
-the network.
+Three architecture bake-offs (10 backbones: MLP variants, CNN, attention) reached the same
+verdict. On the free-placement task every architecture plateaued at ~0%. On the robot task
+the plain MLPs cleanly solved it while the transformers barely learned it. And on the
+drop-height task, the ranking was **every 100%-completing backbone is an MLP variant**
+(layernorm/wide/plain), with the spatial ones at the bottom (CNN last, 12% completion) —
+they run on the GPU and still lose to a two-layer MLP on this sample-starved, physics-bound
+env. The bottleneck was always the *problem shaping*, not the network.
 
 ---
 
