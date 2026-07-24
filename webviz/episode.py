@@ -39,9 +39,10 @@ def main() -> None:
     if a.env == "robot":
         if a.list:
             policies = ["oracle", "random"] + [f"ckpt:{c}" for c in list_robot_checkpoints()]
-            print(json.dumps({"policies": policies, "specs": SPECS, "scenarios": ["empty"]}))
+            print(json.dumps({"policies": policies, "specs": SPECS,
+                              "scenarios": ["empty", "prefill"]}))
         else:
-            print(json.dumps(run_robot_episode(a.policy, a.seed, a.spec)))
+            print(json.dumps(run_robot_episode(a.policy, a.seed, a.spec, a.scenario)))
         return
 
     if a.list:

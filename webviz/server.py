@@ -114,11 +114,14 @@ def _robot_drop_control(policy_name: str) -> bool:
         return False
 
 
-def run_robot_episode(policy_name: str, seed: int, spec_str: str) -> dict:
+def run_robot_episode(policy_name: str, seed: int, spec_str: str,
+                      scenario: str = "empty") -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
-    if _robot_drop_control(policy_name):
-        u = env.unwrapped
-        u.env_cfg = type(u.env_cfg)(drop_control=True)
+    u = env.unwrapped
+    drop = _robot_drop_control(policy_name)          # match the checkpoint's mechanic
+    prefill = 1.0 if scenario == "prefill" else 0.0  # force a random partial structure to complete
+    if drop or prefill:
+        u.env_cfg = type(u.env_cfg)(drop_control=drop, prefill_prob=prefill)
     try:
         policy = build_robot_policy(policy_name, env)
         return record_robot_trajectory(env, policy, seed=seed, spec=parse_spec(spec_str))
