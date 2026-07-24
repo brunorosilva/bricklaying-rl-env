@@ -98,25 +98,24 @@ class ResMLP(nn.Module):
 
 
 class CNN(nn.Module):
-    """A proper convnet: a conv stack over the (course x slot) brick grid, an
-    adaptive pool, then a multi-layer dense head with the global scalars fused in -
-    the standard conv-stack -> pool -> flatten -> dense-head shape, instead of the
-    old conv -> single-Linear projection. Conv blocks read local brick neighborhoods
-    (3x3 receptive field, deepening 8->32->32->64); the pool gives a fixed 3x5 coarse
-    map; the two dense layers do the reasoning on top."""
+    """Conv feature-extractor over the (course x slot) brick grid, then a proper
+    multi-layer dense head (with the global scalars fused in) - conv -> flatten ->
+    dense-head, instead of the old conv -> single-Linear projection.
 
-    POOL = (3, 5)  # coarse spatial map after the conv stack (6x11 -> 3x5)
+    NO spatial pooling: the task hinges on *which specific slot* is the next target,
+    so pooling (which averages per-slot resolution away) is a poor fit here - the
+    convs stay padded to keep the full 6x11 grid, and every cell reaches the dense
+    head. Conv blocks (3x3, 8->32->32) read local brick neighborhoods; the two dense
+    layers do the reasoning."""
 
-    def __init__(self, n_glob=N_GLOB, hidden=128):
+    def __init__(self, n_glob=N_GLOB, hidden=128, channels=32):
         super().__init__()
         self.split = _SlotSplit()
         self.conv = nn.Sequential(
-            layer_init(nn.Conv2d(N_SLOT_FEATURES, 32, 3, padding=1)), nn.Tanh(),
-            layer_init(nn.Conv2d(32, 32, 3, padding=1)), nn.Tanh(),
-            layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.Tanh(),
-            nn.AdaptiveAvgPool2d(self.POOL),
+            layer_init(nn.Conv2d(N_SLOT_FEATURES, channels, 3, padding=1)), nn.Tanh(),
+            layer_init(nn.Conv2d(channels, channels, 3, padding=1)), nn.Tanh(),
         )
-        conv_out = 64 * self.POOL[0] * self.POOL[1]
+        conv_out = channels * C_MAX * S_MAX
         self.head = nn.Sequential(
             layer_init(nn.Linear(conv_out + n_glob, 256)), nn.Tanh(),
             layer_init(nn.Linear(256, hidden)), nn.Tanh(),
@@ -125,7 +124,7 @@ class CNN(nn.Module):
 
     def forward(self, x):
         slots, glob = self.split(x)
-        c = self.conv(slots.permute(0, 3, 1, 2))  # (B, F, C, S) -> (B, 64, 3, 5)
+        c = self.conv(slots.permute(0, 3, 1, 2))  # (B, F, C, S), grid preserved
         c = c.reshape(c.shape[0], -1)
         return self.head(torch.cat([c, glob], dim=1))
 
