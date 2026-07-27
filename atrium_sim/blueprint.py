@@ -145,13 +145,48 @@ ROBOT_BIG_SPECS: tuple[WallSpec, ...] = tuple(
     if WallSpec(m, c) not in ROBOT_BIG_EVAL_SPECS
 )
 
+# Held-out BIG-wall eval (the Track-A generalization headline): every spec exceeds the L3
+# curriculum frontier (10x6) in >=1 axis, so a policy trained capped at L3 sees these
+# zero-shot. (Thin 2x40-style piers are a physics-limit probe, scored separately, not here.)
+ROBOT_HUGE_EVAL_SPECS: tuple[WallSpec, ...] = (
+    WallSpec(12, 8), WallSpec(16, 6), WallSpec(6, 14), WallSpec(20, 10),
+)
+
+# Competence-gated SIZE curriculum: (max_modules, max_courses) per rung. sample_spec(level=L)
+# draws uniformly from the WHOLE box up to rung L (keeps small walls in the mix -> no
+# catastrophic forgetting); the trainer advances L when frontier competence crosses a
+# threshold. Reaches facade scale (wide walls + tall piers) at the top rung.
+SIZE_LADDER: tuple[tuple[int, int], ...] = (
+    (5, 3),    # L0  N<=16  (== the small "robot" suite)
+    (6, 4),    # L1
+    (8, 5),    # L2
+    (10, 6),   # L3
+    (12, 8),   # L4
+    (16, 10),  # L5
+    (20, 14),  # L6  facade scale
+)
+
 _SUITES = {
     "train": TRAIN_SPECS, "interp": INTERP_SPECS, "extrap": EXTRAP_SPECS,
     "robot": ROBOT_SPECS, "robot_eval": ROBOT_EVAL_SPECS,
     "robot_big": ROBOT_BIG_SPECS, "robot_big_eval": ROBOT_BIG_EVAL_SPECS,
+    "robot_huge_eval": ROBOT_HUGE_EVAL_SPECS,
 }
 
 
-def sample_spec(rng: np.random.Generator, suite: str = "train") -> WallSpec:
+def frontier_specs(level: int) -> tuple[WallSpec, ...]:
+    """A few representative walls at curriculum rung `level`: the corner (hardest at this rung),
+    a wide-short, and a narrow-tall. Used to measure frontier competence for advancing."""
+    max_m, max_c = SIZE_LADDER[min(level, len(SIZE_LADDER) - 1)]
+    return (WallSpec(max_m, max_c), WallSpec(max_m, 2), WallSpec(3, max_c))
+
+
+def sample_spec(rng: np.random.Generator, suite: str = "train",
+                level: int | None = None) -> WallSpec:
+    """Fixed-suite sampling by default. If `level` is given (curriculum on), sample uniformly
+    from the whole (3..max_modules) x (2..max_courses) box up to that ladder rung."""
+    if level is not None:
+        max_m, max_c = SIZE_LADDER[min(level, len(SIZE_LADDER) - 1)]
+        return WallSpec(int(rng.integers(3, max_m + 1)), int(rng.integers(2, max_c + 1)))
     specs = _SUITES[suite]
     return specs[int(rng.integers(len(specs)))]

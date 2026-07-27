@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 import atrium_sim  # noqa: F401
-from atrium_sim.blueprint import _SUITES
+from atrium_sim.blueprint import _SUITES, SIZE_LADDER, frontier_specs
 from train.agent import HybridAgent, HybridAgentPolicy, save_hybrid_checkpoint
 from train.ppo import compute_gae
 
@@ -78,11 +78,20 @@ class Args:
     run_dir: str = "runs"
     track: bool = False
     wandb_project: str = "atrium-sim"
+    curriculum: bool = False    # competence-gated SIZE curriculum: start on small walls and grow
+                                # the max wall size as the policy masters each frontier (the core
+                                # generalization lever). Uses blueprint.SIZE_LADDER. Overrides --suite.
+    start_level: int = 0
+    advance_threshold: float = 0.9   # advance a rung when frontier frac_filled >= this ...
+    advance_patience: int = 2        # ... for this many consecutive evals in a row
+    curriculum_cap: int = 3          # don't advance past this rung (3 = 10x6), so the held-out
+                                     # bigger eval walls stay genuinely out-of-distribution
 
 
 def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
              drop_control: bool = False, drop_penalty_frac: float = 0.0,
-             prefill_prob: float = 0.0, fall_off_edge: bool = False):
+             prefill_prob: float = 0.0, fall_off_edge: bool = False,
+             curriculum: dict | None = None):
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
@@ -92,16 +101,20 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
         # drop_control: box[1] chooses the release height (impact velocity is emergent);
         # drop_penalty_frac penalizes a high release toward gentle placement.
         # prefill_prob: some episodes start with a random partial structure to complete.
+        # curriculum (a shared {"level": int} holder, or None): when set, the env samples the
+        # wall size from the curriculum frontier instead of the fixed suite.
         u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
                                     drop_control=drop_control,
                                     drop_penalty_frac=drop_penalty_frac,
                                     prefill_prob=prefill_prob,
-                                    fall_off_edge=fall_off_edge)
+                                    fall_off_edge=fall_off_edge,
+                                    curriculum=curriculum is not None)
         # softer collapse/waste penalties so the agent is less "afraid" to attempt
         # the hard last bricks (top course, half-brick ends); precision plateau unchanged
         u.reward_cfg = type(u.reward_cfg)(
             sigma_mm=sigma_mm, sigma_deg=sigma_deg, collapse_penalty=0.5, c_waste=0.25
         )
+        u._curriculum = curriculum  # shared by reference across all envs (single-process vec-env)
         return env
 
     return thunk
@@ -110,7 +123,7 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
 def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: float,
                    sigma_deg: float, random_start: bool, drop_control: bool = False,
                    drop_penalty_frac: float = 0.0, prefill_prob: float = 0.0,
-                   fall_off_edge: bool = False) -> dict:
+                   fall_off_edge: bool = False, level: int | None = None) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
     u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
@@ -120,7 +133,8 @@ def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: floa
                                 fall_off_edge=fall_off_edge)  # match training
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
     policy = HybridAgentPolicy(agent)
-    specs = _SUITES[suite]
+    # level set -> measure competence at that curriculum frontier; else the fixed eval suite
+    specs = frontier_specs(level) if level is not None else _SUITES[suite]
     keys = ("episode_return", "frac_in_tol", "frac_filled", "completed", "moves", "placements")
     acc = {k: [] for k in keys}
     lowers = []  # drop_control diagnostic: mean decoded lower_frac on PLACE actions
@@ -166,10 +180,14 @@ def main(args: Args) -> dict:
     if args.torch_threads > 0:
         torch.set_num_threads(args.torch_threads)
 
+    # curriculum: a single mutable holder shared by reference across all envs (single-process
+    # SyncVectorEnv), advanced by the trainer as frontier competence rises. None = fixed suite.
+    curriculum = {"level": args.start_level} if args.curriculum else None
+    above_frontier = 0  # consecutive evals whose frontier frac_filled >= advance_threshold
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start,
                   args.drop_control, args.drop_penalty_frac, args.prefill_prob,
-                  args.fall_off_edge)
+                  args.fall_off_edge, curriculum)
          for _ in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
@@ -309,6 +327,26 @@ def main(args: Args) -> dict:
             n_evals += 1
             for k, v in last_eval.items():
                 writer.add_scalar(f"eval/{k}", v, global_step)
+            if curriculum is not None:
+                # measure competence at the CURRENT frontier and advance a rung when it's
+                # mastered (the fixed eval_suite above stays the held-out generalization metric)
+                front = evaluate_robot(agent, args.eval_episodes, args.eval_suite,
+                                       args.sigma_mm, args.sigma_deg, args.random_start,
+                                       args.drop_control, args.drop_penalty_frac,
+                                       args.prefill_prob, args.fall_off_edge,
+                                       level=curriculum["level"])
+                writer.add_scalar("curriculum/frontier_frac_filled", front["frac_filled"], global_step)
+                cap = min(args.curriculum_cap, len(SIZE_LADDER) - 1)
+                if front["frac_filled"] >= args.advance_threshold:
+                    above_frontier += 1
+                    if above_frontier >= args.advance_patience and curriculum["level"] < cap:
+                        curriculum["level"] += 1
+                        above_frontier = 0
+                        print(f"  curriculum -> L{curriculum['level']} {SIZE_LADDER[curriculum['level']]}",
+                              flush=True)
+                else:
+                    above_frontier = 0
+                writer.add_scalar("curriculum/level", curriculum["level"], global_step)
             save_hybrid_checkpoint(agent, str(run_path / "ckpt.pt"), extra={"args": vars(args)})
             if args.gif_every and n_evals % args.gif_every == 0:
                 try:

@@ -36,7 +36,6 @@ from atrium_sim.constants import (
     GRAVITY,
     HALF_ENVELOPE,
     HALF_VERTS,
-    H_MAX,
     IDLE_SPEED_THRESHOLD,
     OOB_X_MARGIN_MM,
     OOB_Y_MM,
@@ -120,7 +119,11 @@ class PhysicsWorld:
         # honor the requested height but never start below gentle (the probe only
         # ever raises y, preserving the never-inject-overlap guarantee).
         y = gentle_y if release_y is None else max(release_y, gentle_y)
-        ceiling = H_MAX + 120.0
+        # constant probe headroom (2 courses) ABOVE the requested spawn height, so the
+        # overlap probe can raise the brick a little to find a clear spot. Size-agnostic:
+        # was a fixed H_MAX+120 = 480mm that gave shrinking headroom as courses rose and
+        # hit zero at ~course 8, physically capping every wall at 8 courses.
+        ceiling = y + 120.0
         while y <= ceiling:
             body.position = (x, y)
             if not self.space.shape_query(shape):

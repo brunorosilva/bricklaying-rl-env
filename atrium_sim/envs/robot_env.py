@@ -82,9 +82,12 @@ class RobotEnvConfig:
                                       # base toward the nearest unplaced target (Ng et al.;
                                       # optimal-policy-invariant). Supplies the directional
                                       # movement signal that was missing.
-    course_bonus: float = 1.0         # milestone reward for fully completing a course - makes
-                                      # "finish this level and move up" a concrete, reachable
-                                      # goal (the all-or-nothing completion bonus is too far).
+    course_bonus_frac: float = 0.3    # course-completion milestone, as a fraction of r_scale spread
+                                      # over ALL courses: total course mass = course_bonus_frac*r_scale
+                                      # for ANY wall height (was a FLAT 1.0/course = n_courses total,
+                                      # which on a 12-course wall was 12 > r_scale=10 and drowned the
+                                      # /N per-brick precision reward - the reward-scale bug that made
+                                      # tall walls collapse). Potential-based, so optimal-policy-invariant.
     wander_threshold: int = 3         # a run of >= this many consecutive MOVEs with no brick
                                       # placed in between is "wandering"; each move at/after the
                                       # threshold takes wander_penalty. Directly attacks the
@@ -118,6 +121,10 @@ class RobotEnvConfig:
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
     suite: str = "train"
+    curriculum: bool = False          # when True, reset() samples the wall size from the
+                                      # curriculum frontier (self._curriculum["level"], a mutable
+                                      # holder the trainer advances) instead of the fixed suite -
+                                      # a competence-gated size schedule (the generalization lever).
 
 
 class BrickLayerRobotEnv(gym.Env):
@@ -147,8 +154,12 @@ class BrickLayerRobotEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+        level = None
+        if self.env_cfg.curriculum:
+            holder = getattr(self, "_curriculum", None)
+            level = holder["level"] if holder else 0
         spec: WallSpec = (options or {}).get("spec") or sample_spec(
-            self.np_random, self.env_cfg.suite
+            self.np_random, self.env_cfg.suite, level=level
         )
         self.blueprint = generate_blueprint(spec)
         self._support = self._compute_support(self.blueprint)
@@ -216,10 +227,14 @@ class BrickLayerRobotEnv(gym.Env):
             reward += self._do_move(mode)
         reward += self._reach_potential() - prev_reach
 
-        # milestone bonus for each newly-completed course (rewards stacking levels)
+        # potential-based course milestone: Phi_course = course_bonus_frac*r_scale*(completed/n_courses),
+        # so the TOTAL course-milestone mass is course_bonus_frac*r_scale for ANY wall height (size-
+        # invariant). Applied on the delta (telescoping); a negative delta claws the bonus back if a
+        # course de-completes on collapse.
         completed = self._completed_course_count()
-        if completed > self._completed_courses:
-            bonus = self.env_cfg.course_bonus * (completed - self._completed_courses)
+        if completed != self._completed_courses:
+            per_course = self.env_cfg.course_bonus_frac * cfg.r_scale / self.blueprint.n_courses
+            bonus = per_course * (completed - self._completed_courses)
             reward += bonus
             self._terminal_terms += bonus
             self._completed_courses = completed
@@ -326,6 +341,9 @@ class BrickLayerRobotEnv(gym.Env):
             self.moves += 1
             self._terminal_terms -= self.env_cfg.fall_penalty
             return -self.env_cfg.fall_penalty
+        # distance to the nearest open work BEFORE the move (for the anti-wander gate below)
+        nt = self._nearest_open()
+        d_before = abs(nt.x - self.base_x) if nt is not None else 0.0
         step = self.env_cfg.move_step_mm * (-1.0 if mode == Mode.MOVE_LEFT else 1.0)
         self.base_x = float(np.clip(self.base_x + step, 0.0, self.blueprint.length))
         self.moves += 1
@@ -333,31 +351,27 @@ class BrickLayerRobotEnv(gym.Env):
         # audit unchanged by a move, but keep report fresh for obs consistency
         scale = self.reward_cfg.r_scale / self.blueprint.n_targets
         cost = self.env_cfg.move_cost_frac * scale
-        # anti-wander: penalize each move once a run of >= wander_threshold consecutive
-        # moves has passed with no brick placed (a placement resets the streak)
+        # anti-wander: once a run of >= wander_threshold moves has passed with no placement,
+        # penalize ONLY moves that increase the distance to work. Level ordering REQUIRES long
+        # empty return-traverses (finish a course at the right end, then cross back to the next
+        # course's leftmost target); those REDUCE distance to the next target and must not be
+        # punished. Pure dithering/oscillation away from work still is.
         if self._moves_since_place >= self.env_cfg.wander_threshold:
-            cost += self.env_cfg.wander_penalty_frac * scale
+            d_after = abs(nt.x - self.base_x) if nt is not None else 0.0
+            if d_after > d_before:
+                cost += self.env_cfg.wander_penalty_frac * scale
         return -cost
 
     def _random_prefill(self) -> None:
-        """Pre-place a random, support-closed (physically stable) partial structure at
-        exact target positions, so the robot has to COMPLETE an already-standing wall.
-        Grow the set from the base: repeatedly add a random target whose supports are
-        all already placed, up to a random fraction of the wall. Spawned directly (not
-        via _do_place) so it doesn't count as an agent placement."""
+        """Pre-place a random FLAT-TOPPED partial structure at exact targets, so the robot has
+        to COMPLETE an already-standing, LEVEL wall. Because targets are ordered (course, slot),
+        the first `count` of them are whole bottom courses plus a left-to-right prefix of the
+        current course - i.e. exactly the level build order, and always physically stable.
+        Spawned directly (not via _do_place) so it doesn't count as an agent placement."""
         n = self.blueprint.n_targets
-        count = int(self.np_random.integers(1, max(1, int(self.env_cfg.prefill_max_frac * n)) + 1))
-        placed: set[int] = set()
-        while len(placed) < count:
-            frontier = [
-                t for t in self.blueprint.targets
-                if t.tid not in placed
-                and (t.course == 0 or all(s in placed for s in self._support.get(t.tid, [])))
-            ]
-            if not frontier:
-                break
-            placed.add(frontier[int(self.np_random.integers(len(frontier)))].tid)
-        # spawn bottom-up (targets are ordered by course, slot) at exact targets, then settle
+        cap = max(1, min(int(self.env_cfg.prefill_max_frac * n), n - 1))
+        count = int(self.np_random.integers(1, cap + 1))   # 1..cap -> 0 < placed < n
+        placed = {t.tid for t in self.blueprint.targets[:count]}
         for t in self.blueprint.targets:
             if t.tid in placed:
                 self.world.spawn_brick(t.x, t.kind, t.course)
@@ -392,14 +406,17 @@ class BrickLayerRobotEnv(gym.Env):
         return {m.target_id for m in self.report.matches}
 
     def _supported(self, t: BrickTarget, matched: set[int]) -> bool:
-        """A brick is placeable once the bricks it rests on exist (course 0 always).
-
-        This replaces the old 'complete each course across the whole wall first'
-        rule. Support-based placeability lets the robot build a rising left-to-right
-        staircase - the left half-brick is laid as soon as its support exists - so
-        the wall finishes in ONE rightward sweep with no backtracking (which is what
-        blocked every earlier run at ~68%)."""
-        return t.course == 0 or all(b in matched for b in self._support[t.tid])
+        """Level (course-by-course) placeability: a course-c brick is placeable only once
+        EVERY brick in course c-1 is placed. This enforces real-bricklaying order - finish
+        and level each course across the whole wall before ascending - and REPLACES the old
+        support-closed staircase (which climbed diagonally at the left edge and left the top
+        courses unbuilt on tall walls, the exact OOD-collapse pattern). The regular
+        left-to-right/course-by-course decision is also size-invariant, so it extrapolates to
+        walls bigger than trained on. _compute_support/self._support are kept for physics/info;
+        this gate is independent of them."""
+        if t.course == 0:
+            return True
+        return all(b.tid in matched for b in self.blueprint.course_targets(t.course - 1))
 
     def _placeable(self, matched: set[int]) -> list[BrickTarget]:
         return [t for t in self.blueprint.targets
@@ -411,9 +428,16 @@ class BrickLayerRobotEnv(gym.Env):
                 if abs(t.x - self.base_x) <= self.env_cfg.reach_mm]
 
     def _next_place_target(self) -> BrickTarget | None:
-        """Leftmost placeable (supported) reachable target -> the staircase order."""
+        """Reachable placeable target in boustrophedon (snake) order: fill the active course
+        left->right on even courses, right->left on odd. Under the level gate all candidates
+        share the lowest incomplete course; snaking finishes each course adjacent to the next
+        course's start, so the base needs no full empty return-traverse between courses - which
+        is what keeps a tall-wall build inside the move budget (a strict L->R order needs ~2x
+        the moves per course and runs out on 12+ course walls)."""
         cand = self._reachable_open()
-        return min(cand, key=lambda t: (t.x, t.course)) if cand else None
+        if not cand:
+            return None
+        return min(cand, key=lambda t: (t.course, t.x if t.course % 2 == 0 else -t.x))
 
     def _nearest_open(self) -> BrickTarget | None:
         """Nearest placeable unplaced target (fall back to any) - where to move."""
