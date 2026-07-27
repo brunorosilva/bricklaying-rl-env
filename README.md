@@ -14,37 +14,43 @@ is an ongoing, open project, not a closed-off deliverable** — the roadmap at t
 is very much live.
 
 The most interesting part isn't the environment — it's the **debugging story**. A plain
-128×128 MLP went from "pile every brick in one tower" to a mobile robot that navigates
-in both directions and completes walls it was never trained on. Every single gain came
-from **reward and task design, never a bigger network**.
+128×128 MLP went from "pile every brick in one tower" to a mobile robot that builds walls
+**far bigger than any it trained on** — zero-shot to a 20×14 facade-scale wall (287 bricks)
+from a policy that only trained up to 10×6. Every single gain came from **reward and task
+design, never a bigger network**.
 
 ---
 
 ## The mobile robot (current state)
 
 The robot rides a 1D rail with a finite ~500mm reach, so it *has* to move to build a
-wall wider than its arm. It observes the blueprint + what it's built, and each step it
-chooses: **move left, move right, or place** (with a fine horizontal offset). Below,
-`robot10` builds a **6×4 wall it never saw in training**, starting from a random spot on
-the rail — completing it 100%, navigating as needed:
+wall wider than its arm. It reads a compact **sensor vector** (not the whole blueprint) and
+each step chooses: **move left, move right, or place** (with a fine horizontal offset).
+Below, `robot16` builds a **6×14 wall — 2.3× taller than anything it trained on** — from a
+random spot on the rail, course by course, to 100%:
 
-![robot10 completing a held-out 6×4 wall](media/robot10.gif)
+![robot16 building a held-out 6×14 wall zero-shot](media/robot16_6x14.gif)
 
-### How well it generalizes (plain MLP)
+### It generalizes to walls far bigger than it trained on
 
-Trained only on a mix of 3–8 module × 2–5 course walls, evaluated from random start
-positions:
+For a long time every policy hit the same wall: it built up to its *training* size, then
+collapsed — the top courses simply never got placed (6×10 → 43% fill, a diagonal decline).
+Trained only up to **10×6**, `robot16` now builds **zero-shot, at 100% fill *and* 100%
+within ±3mm**, on every size tested:
 
-| wall | bricks | in training? | fill | completes? |
+| wall | bricks | vs. training | fill | within ±3mm |
 |---|---|---|---|---|
-| 3×2 – 7×4 | 6–28 | trained sizes | 1.00 | ✅ 100% |
-| **4×3, 6×4** | 12–24 | **held out** | 1.00 | ✅ **100%** |
-| 8×5 | 40 | held out | 0.83 | ❌ (builds most) |
-| 9×5, 10×6 | 45–60 | **extrapolation** | 0.71 / 0.60 | ❌ (graceful) |
+| ≤ 10×6 | ≤ 60 | trained range | 1.00 | 100% |
+| **6×14** | 84 | **2.3× taller** | **1.00** | **100%** |
+| **20×4** | 80 | **2× wider** | **1.00** | **100%** |
+| **12×8 · 16×10** | 100–165 | far out-of-dist. | **1.00** | **100%** |
+| **20×14** | **287** | **facade scale** | **1.00** | **100%** |
 
-It completes unseen sizes it can interpolate, and *degrades gracefully* on walls larger
-than anything it trained on — where an earlier version placed **zero** bricks and just
-wandered.
+The `fill`-vs-height curve is now **flat at 1.0** — no diagonal decline, no cliff, on either
+axis. Here it is on the very **10×6 wall the previous best (`robot11`, below) failed on** by
+frantically dropping bricks into the reachable third:
+
+![robot16 completing a 10×6 wall the previous policy failed on](media/robot16_10x6.gif)
 
 ### The journey (each plateau → a named root cause → a fix)
 
@@ -63,7 +69,16 @@ wandered.
    completes from *any* start position.
 5. **Doesn't scale.** It placed nothing on walls ≥6 modules — it wandered forever. Fix:
    an **anti-wander penalty** (3 moves with no placement starts costing) + a **mixed
-   small→big curriculum** → the generalization table above.
+   small→big curriculum** → graceful degradation instead of catastrophic collapse.
+6. **The plateau: never builds bigger than trained.** Even so, every policy collapsed
+   *past* its training size. Diagnosis found four compounding causes — the dominant one a
+   **hard physics ceiling**: the spawn probe was clamped to a fixed height, so **no wall
+   could physically build past ~8 courses**, whatever the policy. Fixes: a size-agnostic
+   spawn ceiling, a **scale-invariant reward** (the per-course bonus no longer drowns
+   precision on tall walls), **level course-by-course ordering** (a size-invariant build
+   pattern that extrapolates), and a **competence-gated size curriculum** that grows the
+   wall as the policy masters each frontier → the flat table above, **precision included,
+   for free** (100% within ±3mm, no drop-height trick needed).
 
 ### Architecture is *not* the lever
 
@@ -77,7 +92,7 @@ env. The bottleneck was always the *problem shaping*, not the network.
 
 ---
 
-## Latest: model-controlled drop height (`robot11`)
+## Earlier: model-controlled drop height (`robot11`)
 
 The next task hands the physics a bigger role. Instead of each brick appearing just above
 its slot, the arm **homes at the top of the wall** and the model chooses **how far to lower
@@ -240,11 +255,15 @@ connected panels**; then the robot fills a whole facade the way it fills a singl
 
 ## Roadmap (this is not a closed-off project)
 
-- ~~Model-controlled drop height~~ ✅ **done** (see above) — and it's now the best result.
-  Open thread: pin down *why* a hard drop yields sub-mm placement (a clean ablation:
-  same policy, forced-gentle vs forced-hard release, to separate physics from learning).
+- ~~Generalize to walls bigger than trained on~~ ✅ **done** (`robot16`, see above) — a
+  physics-ceiling + reward-scale + level-ordering + size-curriculum fix; zero-shot to
+  20×14 (287 bricks) at 100% fill and 100% within ±3mm, from a policy capped at 10×6.
+- ~~Model-controlled drop height~~ ✅ **done** — sub-mm precision via physics (though
+  `robot16` reaches 100% within ±3mm without it, so it's a nice-to-have now). Open thread:
+  pin down *why* a hard drop yields sub-mm placement (a forced-gentle vs forced-hard ablation).
 - ~~Image/VLM → buildable plan~~ ✅ **v1 done** (facade section above). Next: openings +
-  lintels in the *env* so the robot actually builds a facade panel (window void included).
+  lintels in the *env* so the robot fills a whole facade — the window void *and* the
+  brickwork above it — the way it fills a single wall.
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
 - GRPO (`Agent(critic=False)` seam is already in place).
