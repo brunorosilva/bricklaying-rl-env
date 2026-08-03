@@ -108,8 +108,60 @@ Isolated, single-arch spans are solid: ring closure and strike survival hit 1.0 
 semicircular and segmental styles zero-shot. Honest gap, in the same spirit as `robot11`'s
 10×6 failure above: on a full multi-arch facade like this one the robot still **stalls well
 short of finishing** — exactly the kind of out-of-distribution breakdown that took `robot16`
-several diagnosed root causes to fix for plain walls. That diagnosis (why it stops, not just
-that it stops) is the active thread — see the roadmap.
+several diagnosed root causes to fix for plain walls.
+
+### Diagnosed: why it stops in place (four root causes, not one)
+
+Root-caused the same way as the `robot16` plateau — by measurement, not guessing. Two were
+env/physics defects (fixed): a crown-course packing height computed with the wrong sign
+(vertical clearance instead of horizontal) capped whole courses out of tolerance above real
+arches, and successfully-placed voussoirs were being scored as stray *waste* (they live
+outside the flat-wall audit's target set by construction), which could lock the policy into
+permanently avoiding PLACE. Both are fixed; the oracle's `uk_terrace` score went from 0.365 to
+0.612 fill, with the remaining gap narrowed to a documented, physically-marginal seating case
+(a flush jack-arch crown at ring scale) rather than an infinite-retry budget burn.
+
+The dominant cause of "stops in place" itself, though, was the MDP: the direction-to-work
+sensor was normalized by **wall length**, while the robot's reach is a **fixed 500mm** — so
+the same physical gap reads as a loud "walk over there" signal on the training-size walls and
+a quiet, misread "close enough, place here" signal on anything longer (~2.2m+). The fix is a
+reach-relative encoding plus **action masking** (PLACE is now illegal whenever nothing is
+reachable) so the failure mode is structurally unreachable rather than merely discouraged.
+This changes the observation shape (`OBS_DIM` 22→28) — **`robot16`/`robot17`/`robot17arch2`'s
+checkpoints no longer load against the current env**; their GIFs above remain the record of
+what they achieved.
+
+### `robot18`: the fixes hold under retraining
+
+Confirmed mechanically before spending a single training step on it: a freshly initialized,
+**untrained** masked policy already emits **zero** invalid PLACEs on `uk_terrace` and a 20×10
+wall (hundreds, unmasked) — the fix removes the failure mode structurally, it doesn't just
+discourage it. Retrained on the full size curriculum (now uncapped through 20×14, previously
+stopped at 12×8 — exactly where the old length-normalized dead band first opened up) plus an
+oracle-gated scenario library isolating the specific skills the diagnosis called for (a known
+exact walking distance, a void wider than reach, a ragged multi-opening course, ...):
+
+![robot18 building a 16x6 wall - a 3520mm traverse, well past the old dead band](media/robot18_16x6.gif)
+
+| held-out metric (huge-wall eval suite) | early in training | end of training |
+|---|---|---|
+| within ±3mm | ~7% | **99.4%** |
+| fill / completion | 100% | 100% |
+| oracle-gated scenario library | ~90% | **100%** |
+| arch strike survival | noisy, 20–55% | **88.9%** |
+
+![robot18's held-out competence climbing over training - precision, scenario library, arch survival](media/robot18_eval_curves.png)
+
+`uk_terrace` itself (regenerated with the arch-aware deterministic tiler `plans/colonial.json`
+already used — the sparse hand-authored plan covered only 118 of 180 brick cells, with the
+arch springers resting on nothing; the regenerated plan is a complete tiling, no gaps) lands
+at **0.59 fill**, matching the
+**oracle's own measured ceiling (0.61)** for this exact plan, not falling short of it — the
+crown course above the jack arch is a genuine, documented physics limit (see above), and the
+policy now builds every course the physics itself permits, then gives up cleanly instead of
+burning its step budget:
+
+![robot18 attempting the full uk_terrace facade](media/robot18_uk_terrace.gif)
 
 ---
 
@@ -195,6 +247,48 @@ uv run python -m train.ppo_robot --exp-name myrobot --suite robot_big \
 cd frontend && npm install && npm run dev   # http://localhost:3000
 ```
 
+## Frontend & webviz
+
+`frontend/` is a Next.js (App Router, Tailwind) site over `webviz/`, which does the actual
+work in Python. Three pages:
+
+- **`/`** — a gallery of pre-baked cases (flat walls, the mobile robot, `plans/uk_terrace.json`'s
+  three arch styles, the VLM-perceived `plans/colonial.json`) that link straight into a replay.
+- **`/replay?env=&policy=&spec=&seed=&scenario=`** — the stage: a 3D/2D toggle (a
+  react-three-fiber scene extruding the same replay JSON into real solids with lighting/
+  shadows/orbit controls, alongside the original 2D canvas port of the pygame renderer),
+  playback (scrub, speed, mm-deviation labels), the per-step reward strip, and the same
+  controls to generate a new episode. State lives in the URL, so a specific run is a
+  shareable link.
+- **`/build`** — paint a grid, add rectangular openings, pick an arch style per opening, run
+  it. The remaining brickwork is tiled into panels server-side (`atrium_sim.facade.tile_facade`,
+  the same deterministic tiler `plans/*.json` go through) — the browser never computes a
+  panel layout itself. There is **no oracle pre-flight**: a plan is validated (no overlaps,
+  nothing out of grid) but not checked for buildability, so an unusual opening layout may
+  turn out to be a hard, or physically impossible, level — the replay is the feedback.
+
+Every replay request spawns `python -m webviz.episode` fresh (`frontend/lib/runPython.ts`),
+so it always runs the **current** env code — there is no long-lived Python process to go
+stale. That process is `.venv/bin/python` resolved relative to the repo root
+(`ATRIUM_REPO_ROOT`, if the frontend is ever run from somewhere else); it must exist, i.e.
+`uv sync --all-extras` must have already run. A custom `/build` plan is too large/structured
+for `--spec`'s argv round-trip, so it goes over the child process's stdin instead
+(`--plan-stdin`). Saved facades under `plans/*.json` are addressed as `house:<name>` (e.g.
+`house:uk_terrace`) throughout — in the `spec` field, in URLs, and in `webviz/server.py`'s
+own plan lookup, which resolves and containment-checks the name against `plans/` first.
+
+The robot policy dropdown is populated from whatever's under `runs/robot/*/ckpt.pt` whose
+saved `obs_dim` matches the **current** `atrium_sim.envs.robot_env.OBS_DIM` — an older
+checkpoint trained against a different observation shape (e.g. `robot16` at 20, `robot17`/
+`robot17arch2` at 22, both superseded by the reach-relative + action-mask fix at 28) simply
+doesn't appear, rather than erroring when selected.
+
+There's a second, legacy path — `uv run python -m webviz.server [--ngrok]` — a zero-Node,
+zero-dependency HTTP server serving its own vanilla-JS page, useful for reaching a running
+instance over Tailscale from a device with no Node install. It only serves the base
+bricklayer env (no robot policies, no arches, no custom plans) and is otherwise unrelated to
+the Next.js app above.
+
 ## Baselines — base env (interp suite, held-out specs)
 
 | policy | return | bricks in ±3mm | notes |
@@ -229,6 +323,7 @@ atrium_sim/           the environment package (installable, torch-free)
   blueprint.py        wall specs -> target layouts (train/interp/extrap/robot suites)
   facade.py           FacadePlan: openings/panels/arches -> a whole-house blueprint
   arch.py             arch geometry: wedges, ring build order, strike survival
+  scenarios.py        oracle-gated scenario library: one skill per level (see below)
   physics.py          PyMunk world: spawn, settle-by-sleeping, out-of-bounds
   reward.py           the audit: matching, quality, potential  <- start here
   observations.py     slot tensor + globals -> vector in [-1,1]
@@ -236,8 +331,10 @@ atrium_sim/           the environment package (installable, torch-free)
   render/             pygame renderer + GIF recorder
 train/                ppo.py / ppo_robot.py (single-file), agent.py, architectures.py, sweep.py
 baselines/            oracle / greedy / random / robot_oracle
-webviz/ + frontend/   Next.js replay viewer (spawns a fresh Python episode per request)
-tests/                reward worked-example pin, physics validation, PPO smoke, robot env
+webviz/               episode.py (per-request CLI) + server.py (legacy standalone) + trajectory.py
+frontend/             Next.js site - app/{page,replay,build}.tsx, components/, lib/replay/
+tests/                reward worked-example pin, physics validation, PPO smoke, robot env,
+                      scenario-library solvability gate
 ```
 
 ## Facade plans from images (VLM)
@@ -286,11 +383,18 @@ connected panels**; then the robot fills a whole facade the way it fills a singl
   pin down *why* a hard drop yields sub-mm placement (a forced-gentle vs forced-hard ablation).
 - ~~Image/VLM → buildable plan~~ ✅ **v1 done** (facade section above).
 - ~~Openings + lintels in the env~~ ✅ **v1 done** — structural arches (voussoir rings,
-  centering, strike survival, see above). Next: diagnose *why* a full multi-arch facade
-  still stalls (root-cause it the way `robot16`'s generalization plateau was root-caused,
-  not just thrown more training steps) and make it reliably buildable end-to-end.
+  centering, strike survival, see above).
+- ~~Diagnose why a full multi-arch facade stalls~~ ✅ **done** (`robot18`, see above) — a
+  length-normalized MDP encoding + a crown-packing sign bug + voussoir waste double-counting;
+  99.4% within ±3mm on the held-out huge-wall suite, 100% scenario-library score, 88.9% arch
+  strike survival. Open thread: `uk_terrace`'s jack-arch crown is still a genuine physics
+  limit (0.61 oracle ceiling), not an MDP/training gap — needs an actual physics fix (a joint-
+  bridging cap across the ring's own top, not another reward/observation change) to close.
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
+- ~~3D web viewer~~ ✅ **v1 done** — a react-three-fiber scene alongside the original 2D
+  canvas (toggle in the UI), extruding the same replay JSON into real solids with lighting/
+  shadows/orbit controls, not a separate simulation path.
 - GRPO (`Agent(critic=False)` seam is already in place).
 
 ## License

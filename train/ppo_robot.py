@@ -26,6 +26,8 @@ from train.agent import HybridAgent, HybridAgentPolicy, save_hybrid_checkpoint
 from train.ppo import compute_gae
 
 N_MODES, BOX_DIM = 3, 3  # [x-offset, tilt-nudge (VOUSSOIR placements only), release-height]
+MASK_DIM = 3   # mask_place/mask_left/mask_right - the LAST 3 columns of the observation
+              # (see robot_env._obs and HybridAgent.mask_dim), one per mode in N_MODES order
 
 
 @dataclass
@@ -73,6 +75,13 @@ class Args:
     prefill_prob: float = 0.0   # fraction of episodes that start with a random partial structure
                                 # already built (the robot must complete a standing wall)
     fall_off_edge: bool = False  # driving off the end of the rail topples the gantry (episode ends)
+    action_mask: bool = True    # mask PLACE-with-nothing-reachable and a MOVE that would only
+                                # clamp to the same rail position out of the mode head's logits
+                                # (see HybridAgent.mask_dim / robot_env._obs's mask_place/left/
+                                # right) - the direct fix for the length-normalized dead band
+                                # that let the policy choose PLACE into thin air on any wall
+                                # longer than it trained on ("stops in place"). False reproduces
+                                # the pre-mask behavior (e.g. to A/B against the reward-only fix).
     suite: str = "robot"        # small walls (3-5 modules): completable, so it learns to
                                 # finish a course and stack levels (big walls are too long-horizon)
     eval_suite: str = "robot_eval"
@@ -90,22 +99,42 @@ class Args:
     start_level: int = 0
     advance_threshold: float = 0.9   # advance a rung when frontier frac_filled >= this ...
     advance_patience: int = 2        # ... for this many consecutive evals in a row
-    curriculum_cap: int = 3          # don't advance past this rung (3 = 10x6), so the held-out
-                                     # bigger eval walls stay genuinely out-of-distribution
+    curriculum_cap: int = 6          # don't advance past this rung (6 = 20x14, the top of
+                                     # SIZE_LADDER). Was 3 (10x6): every robot16/17/17arch run
+                                     # trained on walls no longer than 2640mm at cap 4, which is
+                                     # exactly where the length-normalized dead band (now fixed -
+                                     # see robot_env._obs) first opens up. Raised now that the
+                                     # encoding is reach-relative and the failure is masked out
+                                     # structurally rather than merely discouraged; the held-out
+                                     # generalization metric moves to the scenario library and
+                                     # ROBOT_HUGE_EVAL/eval_suite instead of a size the policy
+                                     # never trains on.
     arch_prob_max: float = 0.0       # cap on the fraction of curriculum episodes that build a
                                      # real structural arch (atrium_sim.facade.sample_arch_plan)
                                      # instead of a flat WallSpec. 0.0 (default) = no arches, the
                                      # exact prior behavior. Requires --curriculum (arches ride
                                      # the same competence-gated size schedule: bigger/harder
                                      # styles only become reachable at higher rungs).
-    arch_prob_per_level: float = 0.05  # arch_prob ramps by this much per curriculum rung
+    arch_prob_per_level: float = 0.15  # arch_prob ramps by this much per curriculum rung, capped
+                                       # at arch_prob_max - was 0.05, which at the OLD curriculum_
+                                       # cap=3/4 never exceeded 0.15/0.20 of the nominal 0.3 (the
+                                       # frequency is coupled to how far the SIZE curriculum has
+                                       # advanced, an unrelated axis). 0.15 reaches arch_prob_max
+                                       # by level 2 - where jack arches first become sampleable
+                                       # (sample_arch_plan's own grid-size gate) - independent of
+                                       # curriculum_cap, so raising the cap for size no longer
+                                       # silently caps arch frequency too.
+    scenario_mix: float = 0.35       # fraction of episodes drawn from the oracle-gated scenario
+                                     # library (atrium_sim.scenarios) instead of the size/arch
+                                     # curriculum - see RobotEnvConfig.scenario_mix. Mixed in
+                                     # alongside arch_prob_*, same "never replacing" pattern.
 
 
 def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
              drop_control: bool = False, drop_penalty_frac: float = 0.0,
              prefill_prob: float = 0.0, fall_off_edge: bool = False,
              curriculum: dict | None = None, arch_prob_max: float = 0.0,
-             arch_prob_per_level: float = 0.05):
+             arch_prob_per_level: float = 0.05, scenario_mix: float = 0.0):
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
@@ -119,6 +148,8 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
         # wall size from the curriculum frontier instead of the fixed suite.
         # arch_prob_max/arch_prob_per_level: a ramping fraction of curriculum episodes build a
         # real structural arch (see RobotEnvConfig.arch_prob_*) instead of a flat WallSpec.
+        # scenario_mix: a fraction of episodes drawn from atrium_sim.scenarios instead (isolated
+        # skill practice - a known exact walking distance, a void wider than reach, ...).
         u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
                                     drop_control=drop_control,
                                     drop_penalty_frac=drop_penalty_frac,
@@ -126,7 +157,8 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
                                     fall_off_edge=fall_off_edge,
                                     curriculum=curriculum is not None,
                                     arch_prob_max=arch_prob_max,
-                                    arch_prob_per_level=arch_prob_per_level)
+                                    arch_prob_per_level=arch_prob_per_level,
+                                    scenario_mix=scenario_mix)
         # softer collapse/waste penalties so the agent is less "afraid" to attempt
         # the hard last bricks (top course, half-brick ends); precision plateau unchanged
         u.reward_cfg = type(u.reward_cfg)(
@@ -149,7 +181,11 @@ def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: floa
                                 drop_penalty_frac=drop_penalty_frac,
                                 prefill_prob=prefill_prob,
                                 fall_off_edge=fall_off_edge)  # match training
-    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
+    # match training's reward_cfg exactly (was dropping collapse_penalty/c_waste, so eval
+    # returns lived on a different scale than training returns - frac_filled/frac_in_tol
+    # were unaffected, but episode_return here was not comparable to the training charts).
+    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
+                                      collapse_penalty=0.5, c_waste=0.25)
     policy = HybridAgentPolicy(agent)
     # level set -> measure competence at that curriculum frontier; else the fixed eval suite
     specs = frontier_specs(level) if level is not None else _SUITES[suite]
@@ -195,7 +231,8 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
     u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
-    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
+    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
+                                      collapse_penalty=0.5, c_waste=0.25)  # match training
     policy = HybridAgentPolicy(agent)
     keys = ("frac_filled", "frac_in_tol", "ring_closure", "arch_strike_survival")
     acc = {k: [] for k in keys}
@@ -213,6 +250,42 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
             acc[k].append(info["metrics"][k])
     env.close()
     return {k: float(np.mean(v)) for k, v in acc.items()}
+
+
+def evaluate_robot_scenarios(agent: HybridAgent, sigma_mm: float, sigma_deg: float,
+                             random_start: bool) -> dict:
+    """Per-SKILL competence over the oracle-gated scenario library (atrium_sim.scenarios),
+    one number per family (traverse_d, cross_void_w, ragged_course, ...) plus the overall
+    mean - a single aggregate would hide a family that's still failing behind others that
+    are already solved (exactly how the original "stops in place" failure hid behind an
+    otherwise-healthy-looking eval_suite average)."""
+    from atrium_sim.scenarios import SCENARIOS, build
+
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    u = env.unwrapped
+    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
+                                      collapse_penalty=0.5, c_waste=0.25)
+    policy = HybridAgentPolicy(agent)
+    out: dict[str, float] = {}
+    all_fill = []
+    for name, (_, difficulties) in SCENARIOS.items():
+        fills = []
+        for i, difficulty in enumerate(difficulties):
+            rng = np.random.default_rng(30000 + i)
+            options = build(name, difficulty, rng)
+            obs, _ = env.reset(seed=30000 + i, options=options)
+            done = False
+            info: dict = {}
+            while not done:
+                obs, r, term, trunc, info = env.step(policy.act(obs))
+                done = term or trunc
+            fills.append(info["metrics"]["frac_filled"])
+        out[name] = float(np.mean(fills))
+        all_fill.extend(fills)
+    out["mean"] = float(np.mean(all_fill))
+    env.close()
+    return out
 
 
 def main(args: Args) -> dict:
@@ -259,13 +332,15 @@ def main(args: Args) -> dict:
     envs = vec_cls(
         [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start,
                   args.drop_control, args.drop_penalty_frac, args.prefill_prob,
-                  args.fall_off_edge, curriculum, args.arch_prob_max, args.arch_prob_per_level)
+                  args.fall_off_edge, curriculum, args.arch_prob_max, args.arch_prob_per_level,
+                  args.scenario_mix)
          for _ in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     obs_dim = int(np.prod(envs.single_observation_space.shape))
     dev = torch.device(args.device)
-    agent = HybridAgent(obs_dim, N_MODES, BOX_DIM, arch=args.arch).to(dev)
+    mask_dim = MASK_DIM if args.action_mask else 0
+    agent = HybridAgent(obs_dim, N_MODES, BOX_DIM, arch=args.arch, mask_dim=mask_dim).to(dev)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     obs_buf = torch.zeros((args.num_steps, args.num_envs, obs_dim), device=dev)
@@ -282,6 +357,7 @@ def main(args: Args) -> dict:
     next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=dev)
     last_losses: dict = {}
     last_eval: dict = {}
+    last_eval_scenarios: dict | None = None
     n_evals = 0
 
     for update in range(1, num_updates + 1):
@@ -405,6 +481,12 @@ def main(args: Args) -> dict:
                                                      args.sigma_deg, args.random_start)
                 for k, v in last_eval_arch.items():
                     writer.add_scalar(f"eval_arch/{k}", v, global_step)
+            last_eval_scenarios = None
+            if args.scenario_mix > 0.0:
+                last_eval_scenarios = evaluate_robot_scenarios(agent, args.sigma_mm,
+                                                               args.sigma_deg, args.random_start)
+                for k, v in last_eval_scenarios.items():
+                    writer.add_scalar(f"eval_scenarios/{k}", v, global_step)
             if curriculum is not None:
                 # measure competence at the CURRENT frontier and advance a rung when it's
                 # mastered (the fixed eval_suite above stays the held-out generalization metric)
@@ -449,16 +531,21 @@ def main(args: Args) -> dict:
                 arch_msg = (f"  arch ring {last_eval_arch['ring_closure']:.2%} "
                            f"survive {last_eval_arch['arch_strike_survival']:.2%} "
                            f"filled {last_eval_arch['frac_filled']:.2%}")
+            scenario_msg = ""
+            if last_eval_scenarios is not None:
+                scenario_msg = f"  scenarios {last_eval_scenarios['mean']:.2%}"
             print(f"update {update}/{num_updates}  step {global_step}  SPS {sps}  "
                   f"eval in-tol {last_eval.get('frac_in_tol', 0):.2%}  "
                   f"filled {last_eval.get('frac_filled', 0):.2%}  "
                   f"completed {last_eval.get('completed', 0):.2%}  "
-                  f"return {last_eval.get('episode_return', 0):+.2f}" + arch_msg, flush=True)
+                  f"return {last_eval.get('episode_return', 0):+.2f}" + arch_msg + scenario_msg,
+                  flush=True)
 
     save_hybrid_checkpoint(agent, str(run_path / "ckpt.pt"), extra={"args": vars(args)})
     envs.close()
     writer.close()
     return {"sps": sps, "losses": last_losses, "eval": last_eval,
+            "eval_scenarios": last_eval_scenarios,
             "ckpt": str(run_path / "ckpt.pt"), "global_step": global_step}
 
 

@@ -87,9 +87,16 @@ class HybridAgent(nn.Module):
     LOGSTD_MIN, LOGSTD_MAX = -5.0, 2.0
 
     def __init__(self, obs_dim: int, n_modes: int, box_dim: int, arch: str = "mlp",
-                 critic: bool = True):
+                 critic: bool = True, mask_dim: int = 0):
         super().__init__()
         self.obs_dim, self.n_modes, self.box_dim, self.arch = obs_dim, n_modes, box_dim, arch
+        # mask_dim: the mode head's logits are masked using the LAST `mask_dim` columns of
+        # the observation itself (mask_place/mask_left/mask_right - see robot_env._obs),
+        # rather than a separate info key. That works cleanly under vector envs (no extra
+        # plumbing through SAME_STEP autoreset/info dicts) and keeps the policy's own forward
+        # pass the single source of truth for "what did I actually see." 0 = no masking (the
+        # env didn't emit a mask, e.g. an older obs_dim, or masking is deliberately disabled).
+        self.mask_dim = mask_dim
         self.actor_backbone = build_backbone(arch, obs_dim)
         f = self.actor_backbone.feat_dim
         self.mode_head = layer_init(nn.Linear(f, n_modes), std=0.01)
@@ -98,6 +105,8 @@ class HybridAgent(nn.Module):
         # "placing pays" + precision fast; movement is then discovered where it's
         # actually needed (stuck -> invalid-place penalty -> try MOVE). Without
         # this the untrained policy random-walks and collapses to always-move.
+        # Safe even under masking: PLACE is only ever unavailable exactly when it
+        # would be wasted, so this prior can never be masked into a bad first move.
         self.mode_head.bias.data = torch.tensor([1.5] + [0.0] * (n_modes - 1))
         self.box_mean = layer_init(nn.Linear(f, box_dim), std=0.01)
         self.box_logstd = nn.Parameter(torch.full((1, box_dim), self.LOGSTD_INIT))
@@ -111,7 +120,15 @@ class HybridAgent(nn.Module):
         f = self.actor_backbone(x)
         mean = self.box_mean(f)
         logstd = self.box_logstd.clamp(self.LOGSTD_MIN, self.LOGSTD_MAX).expand_as(mean)
-        return Categorical(logits=self.mode_head(f)), Normal(mean, logstd.exp())
+        logits = self.mode_head(f)
+        if self.mask_dim:
+            ok = x[:, -self.mask_dim:] > 0.5
+            # never mask out EVERY mode (would make the Categorical undefined/NaN) - if the
+            # obs claims all 3 are illegal (shouldn't happen: PLACE and at least one MOVE
+            # direction can't both be blocked at once), fall back to unmasked rather than crash.
+            ok = torch.where(ok.any(dim=-1, keepdim=True), ok, torch.ones_like(ok))
+            logits = logits.masked_fill(~ok, -1e8)
+        return Categorical(logits=logits), Normal(mean, logstd.exp())
 
     def get_value(self, x):
         return self.critic_head(self.critic_backbone(x)).squeeze(-1)
@@ -153,7 +170,7 @@ def save_hybrid_checkpoint(agent: HybridAgent, path: str, extra: dict | None = N
     torch.save({
         "model_state_dict": agent.state_dict(), "obs_dim": agent.obs_dim,
         "n_modes": agent.n_modes, "box_dim": agent.box_dim, "arch": agent.arch,
-        "hybrid": True, **(extra or {}),
+        "mask_dim": agent.mask_dim, "hybrid": True, **(extra or {}),
     }, path)
 
 
@@ -161,7 +178,7 @@ def load_hybrid_agent(path: str) -> HybridAgent:
     # map to cpu so a cuda-trained checkpoint loads on cpu-only inference (frontend)
     ckpt = torch.load(path, weights_only=True, map_location="cpu")
     agent = HybridAgent(ckpt["obs_dim"], ckpt["n_modes"], ckpt["box_dim"],
-                        arch=ckpt.get("arch", "mlp"))
+                        arch=ckpt.get("arch", "mlp"), mask_dim=ckpt.get("mask_dim", 0))
     agent.load_state_dict(ckpt["model_state_dict"])
     agent.eval()
     return agent
