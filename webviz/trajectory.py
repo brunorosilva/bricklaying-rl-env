@@ -8,7 +8,7 @@ the payload stays a few hundred KB.
 
 from __future__ import annotations
 
-from atrium_sim.blueprint import Blueprint, brick_face
+from atrium_sim.blueprint import Blueprint, BrickKind, brick_face
 
 
 def _targets_json(bp: Blueprint) -> list[dict]:
@@ -16,17 +16,42 @@ def _targets_json(bp: Blueprint) -> list[dict]:
     for t in bp.targets:
         w, h = brick_face(t.kind)
         out.append(
-            {"x": round(t.x, 1), "y": round(t.y, 1), "w": w, "h": h,
+            {"tid": t.tid, "x": round(t.x, 1), "y": round(t.y, 1), "w": w, "h": h,
              "kind": int(t.kind), "course": t.course, "slot": t.slot}
         )
     return out
 
 
 def _snapshot(world) -> list[list]:
-    """One tick: every brick as [x, y, theta, kind], rounded to keep JSON small."""
+    """One tick: every brick as [x, y, theta, kind, brick_id] (+ verts as a 6th element for
+    VOUSSOIR bricks only). `brick_id` matches a step's `matches[].brick_id` - without it the
+    frontend had no way to look up which brick a match belongs to except re-deriving the
+    whole audit itself (a second, independently-maintained match_bricks that could silently
+    drift from the real one - exactly what sending `matches` was meant to eliminate). A
+    voussoir has no fixed (w, h) - it's a tapered wedge - so the frontend was drawing it as a
+    plain rectangle (correct in the server-rendered GIFs, wrong in the browser); `verts` are
+    LOCAL (body-frame, pre-rotation) polygon points, straight from physics.BrickPose - the
+    frontend must rotate+translate them by (x, y, theta) itself, the same transform
+    atrium_sim.render.renderer._poly_corners already applies. verts omitted (not null-
+    padded) for flat bricks to keep every other tick's payload as small as possible."""
+    out = []
+    for p in world.poses():
+        row = [round(p.x, 1), round(p.y, 1), round(p.theta, 4), int(p.kind), p.brick_id]
+        if p.kind == BrickKind.VOUSSOIR and p.verts is not None:
+            row.append([[round(vx, 1), round(vy, 1)] for vx, vy in p.verts])
+        out.append(row)
+    return out
+
+
+def _matches_json(report) -> list[dict]:
+    """The audit's own matches, per step - so the frontend's replay renders the SAME
+    matching atrium_sim.reward computed, instead of re-deriving it client-side with a
+    second, independently-maintained implementation of match_bricks that can silently
+    drift from the real one (different GATE/TOL constants, a kind-filter bug, ...)."""
     return [
-        [round(p.x, 1), round(p.y, 1), round(p.theta, 4), int(p.kind)]
-        for p in world.poses()
+        {"brick_id": m.brick_id, "target_id": m.target_id, "dx": round(m.dx, 2),
+         "dy": round(m.dy, 2), "d": round(m.d, 2), "in_tol": bool(m.in_tol)}
+        for m in report.matches
     ]
 
 
@@ -62,6 +87,7 @@ def record_trajectory(env, policy, seed: int | None = None, spec=None, scenario:
                     "frac_in_tol": round(u.report.frac_in_tol, 4),
                     "frac_filled": round(u.report.frac_filled, 4),
                     "waste": int(u.report.waste_count),
+                    "matches": _matches_json(u.report),
                     "ticks": ticks,
                 }
             )
@@ -124,10 +150,11 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None, pla
                 _capture_hard()
             chunk = flat[start:]
             steps.append({
-                "i": step_i, "mode": mode,
+                "i": step_i, "mode": mode, "cursor": int(u._active_course()),
                 "reward": round(float(reward), 4), "return": round(float(u.episode_return), 4),
                 "frac_in_tol": round(u.report.frac_in_tol, 4),
                 "frac_filled": round(u.report.frac_filled, 4),
+                "matches": _matches_json(u.report),
                 "moves": int(u.moves), "placements": int(u.placements),
                 "base_ticks": [f[0] for f in chunk],
                 "ticks": [f[1] for f in chunk],

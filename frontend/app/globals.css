@@ -1,47 +1,81 @@
-:root {
-  --bg: #14161c; --panel: #1b1e26; --panel2: #22262f; --line: #2c313c;
-  --ink: #e7e8ec; --muted: #9aa0ac; --accent: #edb100; --good: #5fb45a; --bad: #d64b45;
+@import "tailwindcss";
+
+/* Theme tokens lifted directly from atrium_sim/render/renderer.py's palette (BG, GROUND,
+   GHOST, NEXT_SLOT, MORTAR, TERRACOTTA, STRAY, ROBOT, STONE, ...) - the browser replay and
+   the server-rendered GIFs should look like the same product, not two skins of one idea.
+   Deliberately dark-only: the replay stage is a canvas of bricks/mortar/ground that the
+   renderer itself only ever draws on a dark ground - a light variant would fight the
+   content, not the chrome, so this commits to one polished theme instead of a half one. */
+@theme {
+  --color-bg: #181a20;
+  --color-panel: #1e212a;
+  --color-panel-2: #262a35;
+  --color-line: #323847;
+  --color-ink: #e7e8ec;
+  --color-muted: #9aa0ac;
+  --color-accent: #f0c850;
+  --color-good: #5fb45a;
+  --color-bad: #d64b45;
+  --color-stage-bg: #181a20;
+  --color-ground: #46484e;
+  --color-ghost: #6e737d;
+  --color-mortar: #69645f;
+  --color-terracotta: #b25c3e;
+  --color-stray: #5a2d28;
+  --color-robot: #5aaadc;
+  --color-robot-dark: #3c78a5;
+  --color-stone: #b2aca0;
+  --color-stone-edge: #6e6c68;
+  --color-cement: #96948f;
+  --color-centering: #785f3c;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+
+html,
 body {
-  background: var(--bg); color: var(--ink);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
 }
-header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex;
-  align-items: baseline; gap: 12px; flex-wrap: wrap; }
-header h1 { font-size: 16px; margin: 0; color: var(--accent); letter-spacing: .3px; }
-header .sub { color: var(--muted); font-size: 12.5px; }
-main { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 16px; padding: 16px 20px; }
-@media (max-width: 820px) { main { grid-template-columns: 1fr; } }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-.stage { padding: 10px; }
-canvas { width: 100%; height: auto; display: block; background: #0f1116; border-radius: 6px; }
-.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 12px;
-  border-top: 1px solid var(--line); }
-button, select, input {
-  background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 7px; padding: 7px 10px; font: inherit;
+
+* {
+  box-sizing: border-box;
 }
-button { cursor: pointer; }
-button:hover:not(:disabled) { border-color: var(--muted); }
-button:disabled { opacity: .5; cursor: default; }
-button.primary { background: var(--accent); color: #1a1400; border-color: var(--accent); font-weight: 600; }
-button.play { min-width: 84px; }
-input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
-label.small { color: var(--muted); font-size: 12px; }
-.row { display: flex; gap: 8px; align-items: center; }
-.side { display: flex; flex-direction: column; gap: 14px; }
-.field { display: flex; flex-direction: column; gap: 4px; }
-.field select, .field input { width: 100%; }
-.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; padding: 12px; }
-.metric { display: flex; flex-direction: column; }
-.metric .v { font-size: 20px; font-variant-numeric: tabular-nums; }
-.metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
-.metric .v.good { color: var(--good); } .metric .v.bad { color: var(--bad); }
-.strip { height: 46px; width: 100%; display: block; }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 0 12px 12px; color: var(--muted); font-size: 12px; }
-.sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
-.status { padding: 0 12px 12px; color: var(--muted); font-size: 12px; min-height: 18px; }
-h3 { margin: 12px 12px 0; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-.tag { font-variant-numeric: tabular-nums; }
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+input[type="range"] {
+  accent-color: var(--color-accent);
+}
+
+/* scrollbars stay dark, not the OS-default light gutter, in every nested scroll container */
+* {
+  scrollbar-color: var(--color-line) transparent;
+}
+
+/* Base form-control styling (Tailwind's preflight strips native chrome, so every
+   select/text-input/number-input across the app gets this without hand-annotating each
+   one). Buttons are left unstyled here - they opt in per-use (primary/secondary/icon all
+   look different), unlike inputs which are visually uniform everywhere in this app. */
+@layer base {
+  select,
+  input[type="text"],
+  input[type="number"] {
+    background: var(--color-panel-2);
+    color: var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: 0.4375rem;
+    padding: 0.4375rem 0.625rem;
+    font: inherit;
+    width: 100%;
+  }
+  select:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+}

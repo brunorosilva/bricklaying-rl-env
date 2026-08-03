@@ -44,10 +44,18 @@ def list_checkpoints() -> list[str]:
     return sorted(str(p.parent.name) for p in RUNS_DIR.glob("*/ckpt.pt"))
 
 
+_robot_ckpt_compat_cache: dict[str, tuple[float, bool]] = {}  # path -> (mtime, is_compatible)
+
+
 def list_robot_checkpoints() -> list[str]:
     """Only checkpoints whose obs_dim matches the CURRENT robot env (the sensor obs).
     Older grid-obs checkpoints (robot9-14) can't run against the new env, so hide them
-    rather than let a selection error out."""
+    rather than let a selection error out.
+
+    Cached by (path, mtime): torch.load-ing every checkpoint under runs/robot/ on EVERY
+    call (confirmed: this endpoint is hit on every frontend page load) was the dominant
+    latency cost of opening the page - a stat() per file is orders of magnitude cheaper,
+    and a checkpoint overwritten mid-training (mtime changes) still gets re-checked."""
     if not ROBOT_RUNS_DIR.exists():
         return []
     import torch
@@ -55,12 +63,20 @@ def list_robot_checkpoints() -> list[str]:
     from atrium_sim.envs.robot_env import OBS_DIM
     out = []
     for p in sorted(ROBOT_RUNS_DIR.glob("*/ckpt.pt")):
-        try:
-            ck = torch.load(str(p), weights_only=True, map_location="cpu")
-            if int(ck.get("obs_dim", -1)) == OBS_DIM:
-                out.append(p.parent.name)
-        except Exception:
-            pass
+        key = str(p)
+        mtime = p.stat().st_mtime
+        cached = _robot_ckpt_compat_cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            compatible = cached[1]
+        else:
+            try:
+                ck = torch.load(str(p), weights_only=True, map_location="cpu")
+                compatible = int(ck.get("obs_dim", -1)) == OBS_DIM
+            except Exception:
+                compatible = False
+            _robot_ckpt_compat_cache[key] = (mtime, compatible)
+        if compatible:
+            out.append(p.parent.name)
     return out
 
 
@@ -115,21 +131,34 @@ def build_robot_policy(name: str, env):
     raise ValueError(f"unknown robot policy: {name!r}")
 
 
-def _robot_ckpt_flags(policy_name: str) -> dict:
-    """The mechanic flags a checkpoint was trained with, so replay reproduces them
-    (drop-height release, rail-edge fall). Older checkpoints default to off."""
+def _robot_ckpt_overrides(policy_name: str) -> tuple[dict, dict]:
+    """(env_cfg overrides, reward_cfg overrides) the checkpoint was trained with, so replay
+    reproduces both the MECHANICS (drop-height release, rail-edge fall) and the REWARD SCALE
+    (c_reach, sigma_mm/deg, collapse_penalty, c_waste) - train.ppo_robot.make_env applies all
+    of these on top of the env's own defaults, so without them replay's displayed reward/
+    return numbers are on a different scale than what training actually optimized. Older
+    checkpoints (no saved args, or missing fields) default to the pre-training-override
+    behavior rather than erroring."""
     if not policy_name.startswith("ckpt:"):
-        return {}
+        return {}, {}
     try:
         import torch
 
         ck = torch.load(str(ROBOT_RUNS_DIR / policy_name[5:] / "ckpt.pt"),
                         weights_only=True, map_location="cpu")
         a = ck.get("args", {})
-        return {"drop_control": bool(a.get("drop_control", False)),
-                "fall_off_edge": bool(a.get("fall_off_edge", False))}
+        env_overrides = {
+            "drop_control": bool(a.get("drop_control", False)),
+            "fall_off_edge": bool(a.get("fall_off_edge", False)),
+            "c_reach": 2.0,  # make_env's own fixed override, not a per-run CLI arg
+        }
+        reward_overrides = {
+            "sigma_mm": float(a.get("sigma_mm", 6.0)), "sigma_deg": float(a.get("sigma_deg", 2.0)),
+            "collapse_penalty": 0.5, "c_waste": 0.25,  # make_env's own fixed overrides
+        }
+        return env_overrides, reward_overrides
     except Exception:
-        return {}
+        return {}, {}
 
 
 def list_house_plans() -> list[str]:
@@ -148,22 +177,58 @@ def list_house_plans() -> list[str]:
 
 
 def _load_house_plan(spec_str: str):
-    """A FacadePlan if spec_str is 'house:<name>' (-> plans/<name>.json), else None."""
+    """A FacadePlan if spec_str is 'house:<name>' (-> plans/<name>.json), else None.
+
+    `name` must resolve to a plain file directly inside PLANS_DIR - rejects any path
+    component (a slash) and any resolved path that escapes PLANS_DIR (`..`, a symlink,
+    an absolute path smuggled in as `name`), so `house:../../etc/passwd`-style spec
+    strings can't be used to read files outside plans/."""
     if not spec_str.startswith(HOUSE_PREFIX):
         return None
     from atrium_sim.facade import FacadePlan
-    return FacadePlan.from_json((PLANS_DIR / f"{spec_str[len(HOUSE_PREFIX):]}.json").read_text())
+
+    name = spec_str[len(HOUSE_PREFIX):]
+    if not name or "/" in name or "\\" in name:
+        raise ValueError(f"invalid plan name: {name!r}")
+    plans_dir = PLANS_DIR.resolve()
+    path = (plans_dir / f"{name}.json").resolve()
+    if plans_dir not in path.parents:
+        raise ValueError(f"invalid plan name: {name!r}")
+    return FacadePlan.from_json(path.read_text())
 
 
 def run_robot_episode(policy_name: str, seed: int, spec_str: str,
-                      scenario: str = "empty") -> dict:
+                      scenario: str = "empty", plan_json: str | None = None) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    flags = _robot_ckpt_flags(policy_name)           # match the checkpoint's mechanics
+    env_overrides, reward_overrides = _robot_ckpt_overrides(policy_name)  # match the checkpoint
     prefill = 1.0 if scenario == "prefill" else 0.0  # force a random partial structure to complete
-    plan = _load_house_plan(spec_str)                # a whole facade/house instead of a single wall
-    if flags or prefill:
-        u.env_cfg = type(u.env_cfg)(prefill_prob=prefill, **flags)
+    if plan_json is not None:
+        # a custom plan (the grid editor) - too big/structured for --spec's argv round-trip,
+        # so it arrives over stdin instead (see webviz.episode --plan-stdin). Validated, not
+        # oracle-checked: a plan can be well-formed and still turn out physically unbuildable
+        # (see README) - the replay itself is the feedback, same as any other level.
+        from atrium_sim.facade import FacadePlan, Opening
+
+        data = json.loads(plan_json)
+        if "panels" in data:
+            plan = FacadePlan.from_json(plan_json)
+        else:
+            # untiled: grid_cols/grid_rows/openings only, straight from the grid editor - the
+            # browser never computes panels itself, the deterministic tiler does (the same
+            # path plans/*.json go through when authored from a photo, see facade.py).
+            openings = [Opening(**o) for o in data.get("openings", [])]
+            plan = FacadePlan.from_perception(
+                data.get("image_ref", "custom"), int(data["grid_cols"]), int(data["grid_rows"]),
+                openings, notes=data.get("notes", ""),
+            )
+        plan.validate()
+    else:
+        plan = _load_house_plan(spec_str)  # a whole facade/house instead of a single wall
+    if env_overrides or prefill:
+        u.env_cfg = type(u.env_cfg)(prefill_prob=prefill, **env_overrides)
+    if reward_overrides:
+        u.reward_cfg = type(u.reward_cfg)(**reward_overrides)
     try:
         policy = build_robot_policy(policy_name, env)
         if plan is not None:
