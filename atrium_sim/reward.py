@@ -138,9 +138,10 @@ def match_bricks(
         for b in bricks:
             if b.kind != t.kind or b.brick_id in consumed:
                 continue
-            theta = fold_angle(b.theta)
+            theta = fold_angle(b.theta - t.theta)
             if abs(theta) > cfg.match_gate_rad:
-                continue  # a toppled brick must not match-and-block the slot
+                continue  # angle far from the target's orientation (e.g. a toppled brick, or a
+                          # voussoir off its radial angle) must not match-and-block the slot
             dx, dy = b.x - t.x, b.y - t.y
             d = math.hypot(dx, dy)
             if d > cfg.match_gate_mm:

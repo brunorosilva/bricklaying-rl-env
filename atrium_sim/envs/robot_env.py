@@ -21,6 +21,7 @@ purely what they unlock).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -29,6 +30,13 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from atrium_sim.arch import (
+    build_order as arch_build_order,
+    ring_drift as arch_ring_drift,
+    survived as arch_survived,
+    voussoir_quality,
+    wedge_verts_mass_kg,
+)
 from atrium_sim.blueprint import (
     Blueprint,
     BrickKind,
@@ -36,8 +44,10 @@ from atrium_sim.blueprint import (
     WallSpec,
     brick_face,
     generate_blueprint,
+    generate_house_blueprint,
     sample_spec,
 )
+from atrium_sim.facade import sample_arch_plan
 from atrium_sim.constants import (
     COURSE_MM,
     DROP_ARM_MARGIN_MM,
@@ -51,6 +61,7 @@ from atrium_sim.constants import (
     OVERHANG_MM,
     REACH_MM,
     SPAWN_DROP_MM,
+    VOUSSOIR_TILT_RANGE_DEG,
 )
 from atrium_sim.physics import PhysicsWorld
 from atrium_sim.reward import AuditReport, RewardConfig, audit, potential
@@ -60,7 +71,7 @@ from atrium_sim.reward import AuditReport, RewardConfig, audit, potential
 # rail position/edges, direction to work, progress. Size-agnostic: identical shape for a
 # 4x3 wall or a 40-course pier. See _obs().
 _ERR_NORM_MM = 30.0   # dx/dy sensor normaliser (full resolution around +-3mm, clips at +-30)
-OBS_DIM = 20
+OBS_DIM = 22   # +2 over the pre-arch 20: "next target is a voussoir", "active arch ring closure"
 
 
 class Mode(IntEnum):
@@ -120,11 +131,32 @@ class RobotEnvConfig:
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
+    voussoir_tilt_range_deg: float = VOUSSOIR_TILT_RANGE_DEG   # box[1]'s tilt-nudge range,
+                                      # VOUSSOIR placements only (flat bricks: box[1] inert,
+                                      # exactly like release-height's existing pattern)
+    arch_ring_closure_frac: float = 0.3   # potential-based, mirrors course_bonus_frac: total
+                                      # ring-closure reward mass across ALL arches combined is
+                                      # arch_ring_closure_frac*r_scale, for any number/size of
+                                      # arches (size-invariant)
+    arch_survive_bonus: float = 1.0  # terminal-style bonus, paid the instant a ring survives
+                                      # its strike (not gated on episode end - it's a real,
+                                      # checkable event the moment the centering comes out)
+    arch_collapse_penalty: float = 1.0   # symmetric penalty if a ring does NOT survive its strike
     suite: str = "train"
     curriculum: bool = False          # when True, reset() samples the wall size from the
                                       # curriculum frontier (self._curriculum["level"], a mutable
                                       # holder the trainer advances) instead of the fixed suite -
                                       # a competence-gated size schedule (the generalization lever).
+    arch_prob_max: float = 0.0        # cap on the fraction of curriculum episodes that build an
+                                      # arch-bearing facade (atrium_sim.facade.sample_arch_plan)
+                                      # instead of a plain flat WallSpec. 0.0 (default) is
+                                      # byte-identical to before this existed - arches only enter
+                                      # training when explicitly opted in via this and curriculum.
+    arch_prob_per_level: float = 0.05   # arch_prob ramps by this much per curriculum rung
+                                      # (capped at arch_prob_max) - larger/harder arch styles
+                                      # only become reachable at higher rungs anyway (see
+                                      # sample_arch_plan's own grid-size gate), so this mirrors
+                                      # that ramp in HOW OFTEN arches appear, not just WHICH ones.
 
 
 class BrickLayerRobotEnv(gym.Env):
@@ -136,10 +168,14 @@ class BrickLayerRobotEnv(gym.Env):
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
 
-        # hybrid action: discrete mode + continuous [offset, kind]
+        # hybrid action: discrete mode + continuous [x-offset, tilt-nudge, release-height].
+        # box[1] (tilt) only applies to VOUSSOIR placements (real arch voussoirs); box[2]
+        # (release height) only applies when drop_control is on - both inert otherwise,
+        # exactly like release-height's existing pattern before this change (a dedicated slot,
+        # not an overload, but contextually a no-op when not applicable).
         self.action_space = spaces.Tuple((
             spaces.Discrete(3),
-            spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
         ))
         self.observation_space = spaces.Box(-1.0, 1.0, shape=(OBS_DIM,), dtype=np.float32)
 
@@ -154,15 +190,67 @@ class BrickLayerRobotEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+        plan = (options or {}).get("plan")
+        explicit_spec = (options or {}).get("spec")
         level = None
         if self.env_cfg.curriculum:
             holder = getattr(self, "_curriculum", None)
             level = holder["level"] if holder else 0
-        spec: WallSpec = (options or {}).get("spec") or sample_spec(
-            self.np_random, self.env_cfg.suite, level=level
-        )
-        self.blueprint = generate_blueprint(spec)
+        if plan is None and explicit_spec is None and self.env_cfg.curriculum:
+            # ramping frequency (see RobotEnvConfig.arch_prob_*): a fraction of curriculum
+            # episodes build an arch-bearing facade instead of a flat WallSpec, so training
+            # sees the arch mechanic mixed in without ever losing the flat-wall skill (only
+            # engaged when arch_prob_max > 0 - byte-identical to before otherwise).
+            arch_prob = min(self.env_cfg.arch_prob_max, self.env_cfg.arch_prob_per_level * level)
+            if arch_prob > 0.0 and float(self.np_random.random()) < arch_prob:
+                plan = sample_arch_plan(self.np_random, level)
+        if plan is not None:
+            # a whole facade (image -> panels + openings) as ONE flat global-mm blueprint;
+            # opening cells are absent, so level ordering fills each course around the void
+            self.blueprint = generate_house_blueprint(plan)
+        else:
+            spec: WallSpec = explicit_spec or sample_spec(
+                self.np_random, self.env_cfg.suite, level=level
+            )
+            self.blueprint = generate_blueprint(spec)
+        # static hard bodies (lintels/sills/cement) spawned as the build reaches their course
+        self._pending_hard = list(plan.hard_bodies()) if plan is not None and hasattr(plan, "hard_bodies") else []
+        self._spawned_hard: set[int] = set()
         self._support = self._compute_support(self.blueprint)
+        # real structural arches (see atrium_sim.arch/facade.ArchRegion): voussoir BrickTargets
+        # live in a SEPARATE pool, not self.blueprint.targets - an arch's ring isn't course-
+        # aligned (a semicircular ring's rise spans several courses of height at varying width),
+        # so it can't be folded into the flat per-course grid the way ordinary bricks are.
+        self._arch_regions = (
+            list(plan.arch_regions()) if plan is not None and hasattr(plan, "arch_regions") else []
+        )
+        self._arch_targets: dict[int, tuple[BrickTarget, ...]] = {}
+        tid_cursor = self.blueprint.n_targets
+        for region in self._arch_regions:
+            vt = region.voussoir_targets(tid_start=tid_cursor)
+            self._arch_targets[region.opening_index] = vt
+            tid_cursor += len(vt)
+            # spandrel packing closing any gap between the ring's true extrados apex and the
+            # crown course (the rise is quantised to whole courses at the springing, but the
+            # ring's actual outer height rarely lands exactly on a course boundary) - uses the
+            # SAME course-triggered spawn-once mechanism as lintels/sills, just appended here
+            # since it's ArchRegion-derived rather than Opening-derived.
+            packing = region.crown_packing_hard_body()
+            if packing is not None:
+                self._pending_hard.append(packing)
+            # spandrel packing closing the LEFT/RIGHT gap, at EVERY course from the springing
+            # to the crown, between the ring's true per-course reach and the tiler's own
+            # worst-case void width (see facade.ArchRegion.spandrel_hard_bodies) - the same
+            # spawn-once mechanism, just recurring per course instead of only at the top.
+            self._pending_hard.extend(region.spandrel_hard_bodies())
+        self._arch_state: dict[int, dict] = {
+            region.opening_index: {
+                "matched": set(), "brick_ids": {}, "before_strike": {},
+                "centering_id": None, "abutments_spawned": False,
+                "struck": False, "survived": None, "thrust_n": 0.0,
+            }
+            for region in self._arch_regions
+        }
         self.world = PhysicsWorld(self.blueprint.length)
         traversal = int(np.ceil(self.blueprint.length / self.env_cfg.move_step_mm))
         # base start: random module-aligned position (forces bidirectional movement)
@@ -172,8 +260,12 @@ class BrickLayerRobotEnv(gym.Env):
         else:
             self.base_x = 0.0
         # step budget = placement budget + a generous move allowance (enough for a
-        # per-course sweep on the biggest walls); episodes end on success first
-        self.budget = self.blueprint.budget + 2 * self.blueprint.n_courses * traversal + 8
+        # per-course sweep on the biggest walls); episodes end on success first. Voussoirs
+        # live OUTSIDE self.blueprint (a separate pool - see reset() above), so
+        # blueprint.budget alone doesn't account for them; add their count (+ spares) directly.
+        n_voussoirs_total = sum(len(vt) for vt in self._arch_targets.values())
+        self.budget = (self.blueprint.budget + n_voussoirs_total + 2 * len(self._arch_regions)
+                       + 2 * self.blueprint.n_courses * traversal + 8)
         self.steps = 0
         self.placements = 0
         self.moves = 0
@@ -239,6 +331,13 @@ class BrickLayerRobotEnv(gym.Env):
             self._terminal_terms += bonus
             self._completed_courses = completed
 
+        # spawn any course-triggered hard bodies (lintels/sills/cement) now that the build has
+        # reached their trigger course -> the opening's lintel appears "at the exact brick level"
+        for idx, hb in enumerate(self._pending_hard):
+            if idx not in self._spawned_hard and hb.trigger_course < completed:
+                self.world.spawn_static_body(hb.verts_mm, hb.kind, sensor=(hb.kind == "voussoir"))
+                self._spawned_hard.add(idx)
+
         # termination - all terminal paths final-settle + re-audit first
         terminated = False
         if self._fell:
@@ -275,14 +374,17 @@ class BrickLayerRobotEnv(gym.Env):
     # --- actions --------------------------------------------------------------
 
     def _do_place(self, box: np.ndarray) -> float:
-        prev_phi = potential(self.report, self.reward_cfg)
         target = self._next_place_target()
         if target is None:  # PLACE with nothing reachable: wasted step
             self.invalid += 1
             return -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
+        if target.kind == BrickKind.VOUSSOIR:
+            return self._do_place_voussoir(target, box)
+        prev_phi = potential(self.report, self.reward_cfg)
         # kind is dictated by the blueprint slot (a masonry robot is TOLD which brick
         # the plan calls for). The agent controls navigation + the placement offset
-        # (box[0]); box[1] is the release height ONLY in drop_control mode (else unused).
+        # (box[0]); box[2] is the release height ONLY in drop_control mode (else unused);
+        # box[1] (tilt) is inert here - VOUSSOIR placements only, see _do_place_voussoir.
         kind = target.kind
         if kind == BrickKind.HALF:
             self.halves_used += 1
@@ -296,7 +398,8 @@ class BrickLayerRobotEnv(gym.Env):
         release_y = self._release_height(target.course, box) if self.env_cfg.drop_control else None
         self._release_y = release_y
         pre = self.world.positions()
-        bid = self.world.spawn_brick(x, kind, target.course, release_y=release_y)
+        bid = self.world.spawn_brick(x, kind, target.course, release_y=release_y,
+                                     theta=target.theta, rest_y=target.y)
         if bid is None:
             self.off_canvas += 1
         removed = self._settle(self.env_cfg.max_settle_substeps)
@@ -315,11 +418,11 @@ class BrickLayerRobotEnv(gym.Env):
         return reward
 
     def _release_height(self, course: int, box: np.ndarray) -> float:
-        """Drop-control: box[1] in [-1,1] picks how far to lower the arm from its home
-        at the wall top before releasing. box[1]=+1 -> fully lowered (gentle, identical
-        to the fixed drop); box[1]=-1 -> released from the top (longest fall, hardest
+        """Drop-control: box[2] in [-1,1] picks how far to lower the arm from its home
+        at the wall top before releasing. box[2]=+1 -> fully lowered (gentle, identical
+        to the fixed drop); box[2]=-1 -> released from the top (longest fall, hardest
         impact). Impact velocity is thus emergent from the fall distance, not chosen."""
-        lower_frac = (float(box[1]) + 1.0) / 2.0
+        lower_frac = (float(box[2]) + 1.0) / 2.0
         gentle_y = COURSE_MM * (course + 0.5) + SPAWN_DROP_MM
         arm_top_y = COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm
         self._arm_top_y = arm_top_y
@@ -329,6 +432,128 @@ class BrickLayerRobotEnv(gym.Env):
         span = max(1.0, arm_top_y - gentle_y)
         self._fall_frac = float(np.clip((release_y - gentle_y) / span, 0.0, 1.0))
         return release_y
+
+    # --- real structural arches -------------------------------------------------------------
+
+    def _arch_region(self, opening_index: int):
+        return next(r for r in self._arch_regions if r.opening_index == opening_index)
+
+    def _arch_ready(self, region) -> bool:
+        """True once every pier course below the springing is complete (the same
+        "finish-and-level before ascending" rule as ordinary courses)."""
+        if region.springing_course <= 0:
+            return True
+        matched = self._matched_ids()
+        return all(t.tid in matched for t in self.blueprint.course_targets(region.springing_course - 1))
+
+    def _ready_arch_voussoir_candidates(self) -> list[BrickTarget]:
+        """The single NEXT voussoir (in build order) for every arch whose piers are ready and
+        whose ring isn't closed yet - one candidate per open arch, enforcing strict
+        springings-to-keystone sequencing (the only order validated to survive striking)."""
+        out = []
+        for region in self._arch_regions:
+            st = self._arch_state[region.opening_index]
+            if st["struck"] or not self._arch_ready(region):
+                continue
+            vt = self._arch_targets[region.opening_index]
+            next_slot = len(st["matched"])
+            if next_slot >= len(vt):
+                continue  # ring closed; strike happens synchronously at closure, not here
+            out.append(next(t for t in vt if t.slot == next_slot))
+        return out
+
+    def _arch_closure_frac(self) -> float:
+        """Ring-closure progress across ALL arches combined, in [0, 1] - the potential for the
+        ring-closure reward term (size-invariant: total mass is arch_ring_closure_frac*r_scale
+        regardless of how many arches or voussoirs there are)."""
+        total = sum(len(vt) for vt in self._arch_targets.values())
+        if total == 0:
+            return 0.0
+        done = sum(len(st["matched"]) for st in self._arch_state.values())
+        return done / total
+
+    def _do_place_voussoir(self, target: BrickTarget, box: np.ndarray) -> float:
+        region = self._arch_region(target.arch_id)
+        st = self._arch_state[target.arch_id]
+        if not st["abutments_spawned"]:
+            # permanent skewback filler blocks (never struck - see arch.abutment_wedge_verts)
+            # + the temporary centering (struck once the ring closes, below).
+            for hb in region.abutment_hard_bodies():
+                self.world.spawn_static_body(hb.verts_mm, hb.kind)
+            cent = region.centering_hard_body()
+            st["centering_id"] = self.world.spawn_static_body(cent.verts_mm, cent.kind, sensor=False)
+            st["abutments_spawned"] = True
+
+        # box[0] = radial-ish x nudge (same convention as flat bricks); box[1] = tilt nudge,
+        # LIVE here (VOUSSOIR placement) unlike for flat bricks; box[2] inert (no drop-control
+        # for voussoirs - they seat directly against their neighbours on the centering).
+        x_off = float(box[0]) * self.env_cfg.offset_range_mm
+        dtheta = float(box[1]) * math.radians(self.env_cfg.voussoir_tilt_range_deg)
+        mass = wedge_verts_mass_kg(target.wedge_verts)
+        self.placements += 1
+        self._moves_since_place = 0
+        pre = self.world.positions()
+        bid = self.world.spawn_brick(
+            target.x + x_off, target.kind, target.course,
+            theta=target.theta + dtheta, rest_y=target.y,
+            wedge_verts=target.wedge_verts, mass_kg=mass,
+        )
+        if bid is None:
+            self.off_canvas += 1
+            return -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
+        removed = self._settle(self.env_cfg.max_settle_substeps)
+        self.off_canvas += len(removed)
+        self.last_disturbance = self._disturbance(pre, bid)
+
+        prev_closure = self._arch_closure_frac()
+        if bid not in removed:
+            st["matched"].add(target.tid)
+            st["brick_ids"][target.tid] = bid
+            poses = {p.brick_id: p for p in self.world.poses()}
+            p = poses.get(bid)
+            if p is not None:
+                st["before_strike"][target.tid] = (p.x, p.y, p.theta)
+                d = float(np.hypot(p.x - target.x, p.y - target.y))
+                dth = float(p.theta - target.theta)
+                self._last_place = (p.x - target.x, p.y - target.y, dth,
+                                     voussoir_quality(d, dth) >= 0.999)
+        new_closure = self._arch_closure_frac()
+        reward = self.env_cfg.arch_ring_closure_frac * self.reward_cfg.r_scale * (new_closure - prev_closure)
+
+        vt = self._arch_targets[target.arch_id]
+        if len(st["matched"]) >= len(vt) and not st["struck"]:
+            reward += self._strike_arch(target.arch_id)
+        return reward
+
+    def _strike_arch(self, opening_index: int) -> float:
+        """The ring is closed: remove the centering (the arch must now stand on its own),
+        settle, and check survival. This is a real, checkable structural event, not a proxy -
+        exactly the moment a real centering is struck."""
+        st = self._arch_state[opening_index]
+        before = dict(st["before_strike"])
+        if st["centering_id"] is not None:
+            self.world.remove_static_body(st["centering_id"])
+        # A struck ring needs MORE settle time than an ordinary placement (in-session
+        # validation used 1800 substeps, 3x final_settle_substeps's default 600) - short of
+        # that, later flat coursework placed directly above the crown lands on a surface that
+        # hasn't fully stopped creeping yet, causing repeated placement failures right above
+        # the arch.
+        self.off_canvas += len(self._settle(3 * self.env_cfg.final_settle_substeps))
+        poses = {p.brick_id: p for p in self.world.poses()}
+        after = {
+            tid: (poses[bid].x, poses[bid].y, poses[bid].theta) if bid in poses else (1e6, 1e6, 0.0)
+            for tid, bid in st["brick_ids"].items()
+        }
+        drift, tilt = arch_ring_drift(before, after)
+        ok = arch_survived(drift, tilt)
+        st["struck"] = True
+        st["survived"] = ok
+        springer_bid = next(iter(st["brick_ids"].values()), None)
+        if springer_bid is not None and springer_bid in poses:
+            st["thrust_n"] = self.world.contact_normal_impulse(springer_bid) / 1000.0
+        bonus = self.env_cfg.arch_survive_bonus if ok else -self.env_cfg.arch_collapse_penalty
+        self._terminal_terms += bonus
+        return bonus
 
     def _do_move(self, mode: Mode) -> float:
         # a real gantry rides a finite rail: if it's already at an end and commands a
@@ -374,7 +599,7 @@ class BrickLayerRobotEnv(gym.Env):
         placed = {t.tid for t in self.blueprint.targets[:count]}
         for t in self.blueprint.targets:
             if t.tid in placed:
-                self.world.spawn_brick(t.x, t.kind, t.course)
+                self.world.spawn_brick(t.x, t.kind, t.course, theta=t.theta, rest_y=t.y)
         self._settle(self.env_cfg.final_settle_substeps)
 
     # --- reachability ---------------------------------------------------------
@@ -413,10 +638,30 @@ class BrickLayerRobotEnv(gym.Env):
         courses unbuilt on tall walls, the exact OOD-collapse pattern). The regular
         left-to-right/course-by-course decision is also size-invariant, so it extrapolates to
         walls bigger than trained on. _compute_support/self._support are kept for physics/info;
-        this gate is independent of them."""
+        this gate is independent of them.
+
+        Real arch voussoirs live in a SEPARATE pool (self._arch_targets), so a flat target's
+        OWN course never directly contains them - but a flat target at or above an arch's
+        crown_course, over that arch's span, is only genuinely supported once the ring beneath
+        it has been STRUCK AND SURVIVED, not merely once the (empty, void) flat course below it
+        is trivially "complete". Without this check the level gate - which knows nothing about
+        arches - would offer crown-course targets while the ring is still mid-build (or, worse,
+        never survives), and a policy would burn its whole budget hammering a target with
+        nothing yet beneath it (discovered in-session: 100s of wasted attempts at the exact
+        crown course, every time, until this gate was added)."""
         if t.course == 0:
             return True
-        return all(b.tid in matched for b in self.blueprint.course_targets(t.course - 1))
+        if not all(b.tid in matched for b in self.blueprint.course_targets(t.course - 1)):
+            return False
+        for region in self._arch_regions:
+            if t.course < region.crown_course:
+                continue
+            half = region.spec.span_mm / 2.0
+            if region.origin_x - half <= t.x <= region.origin_x + half:
+                st = self._arch_state[region.opening_index]
+                if not (st["struck"] and st["survived"]):
+                    return False
+        return True
 
     def _placeable(self, matched: set[int]) -> list[BrickTarget]:
         return [t for t in self.blueprint.targets
@@ -424,8 +669,10 @@ class BrickLayerRobotEnv(gym.Env):
 
     def _reachable_open(self) -> list[BrickTarget]:
         matched = self._matched_ids()
-        return [t for t in self._placeable(matched)
+        flat = [t for t in self._placeable(matched) if abs(t.x - self.base_x) <= self.env_cfg.reach_mm]
+        vous = [t for t in self._ready_arch_voussoir_candidates()
                 if abs(t.x - self.base_x) <= self.env_cfg.reach_mm]
+        return flat + vous
 
     def _next_place_target(self) -> BrickTarget | None:
         """Reachable placeable target in boustrophedon (snake) order: fill the active course
@@ -433,7 +680,10 @@ class BrickLayerRobotEnv(gym.Env):
         share the lowest incomplete course; snaking finishes each course adjacent to the next
         course's start, so the base needs no full empty return-traverse between courses - which
         is what keeps a tall-wall build inside the move budget (a strict L->R order needs ~2x
-        the moves per course and runs out on 12+ course walls)."""
+        the moves per course and runs out on 12+ course walls). Real arch voussoirs are offered
+        one at a time per open arch (build-order enforced upstream), sharing the SAME sort key -
+        a voussoir's `course` is its arch's springing course, so it naturally interleaves with
+        that row's pier bricks by x position."""
         cand = self._reachable_open()
         if not cand:
             return None
@@ -442,9 +692,9 @@ class BrickLayerRobotEnv(gym.Env):
     def _nearest_open(self) -> BrickTarget | None:
         """Nearest placeable unplaced target (fall back to any) - where to move."""
         matched = self._matched_ids()
-        opens = self._placeable(matched) or [
-            t for t in self.blueprint.targets if t.tid not in matched
-        ]
+        opens = list(self._placeable(matched)) + self._ready_arch_voussoir_candidates()
+        if not opens:
+            opens = [t for t in self.blueprint.targets if t.tid not in matched]
         return min(opens, key=lambda t: abs(t.x - self.base_x)) if opens else None
 
     def _completed_course_count(self) -> int:
@@ -523,10 +773,12 @@ class BrickLayerRobotEnv(gym.Env):
             next_dx = np.clip((next_t.x - self.base_x) / self.env_cfg.reach_mm, -1.0, 1.0)
             next_course = next_t.course / max(1, bp.n_courses)
             next_half = 1.0 if next_t.kind == BrickKind.HALF else 0.0
+            next_voussoir = 1.0 if next_t.kind == BrickKind.VOUSSOIR else 0.0
         else:
-            next_dx = next_course = next_half = 0.0
+            next_dx = next_course = next_half = next_voussoir = 0.0
         nearest_dx = np.clip((nearest.x - self.base_x) / length, -1.0, 1.0) if nearest else 0.0
         lp = self._last_place  # (dx, dy, dtheta, in_tol) or None
+        arch_closure = self._arch_closure_frac()
 
         sensors = np.array([
             # --- rail position ---
@@ -553,6 +805,10 @@ class BrickLayerRobotEnv(gym.Env):
             max(0, self.budget - self.steps) / max(1, self.budget),
             len(r.stray_bricks) / max(1, bp.n_targets),
             min(self._moves_since_place / (2 * max(1, self.env_cfg.wander_threshold)), 1.0),
+            # --- arches (0 for every wall/plan with no arch - a flat wall's obs is otherwise
+            # identical to before this feature) ---
+            next_voussoir,                                          # next target is a voussoir
+            arch_closure,                                           # ring-closure across all arches
         ], dtype=np.float32)
         return np.clip(sensors, -1.0, 1.0)
 
@@ -563,6 +819,9 @@ class BrickLayerRobotEnv(gym.Env):
             "moves": self.moves, "placements": self.placements,
         }
         if terminal:
+            n_arches = len(self._arch_regions)
+            struck = [st for st in self._arch_state.values() if st["struck"]]
+            survived_n = sum(1 for st in struck if st["survived"])
             info["metrics"] = {
                 "frac_in_tol": r.frac_in_tol, "frac_filled": r.frac_filled,
                 "waste_frac": r.waste_frac, "waste_count": float(r.waste_count),
@@ -574,6 +833,10 @@ class BrickLayerRobotEnv(gym.Env):
                 "placements": float(self.placements), "moves": float(self.moves),
                 "invalid": float(self.invalid), "steps": float(self.steps),
                 "fell": float(self._fell),
+                "n_arches": float(n_arches),
+                "ring_closure": self._arch_closure_frac(),
+                "arch_strike_survival": (survived_n / len(struck)) if struck else 1.0,
+                "arch_thrust_n": max((st["thrust_n"] for st in struck), default=0.0),
             }
         return info
 
@@ -598,6 +861,7 @@ class BrickLayerRobotEnv(gym.Env):
             cursor=0,
             robot=(self.base_x, self.env_cfg.reach_mm,
                    COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm),
+            hard_bodies=self.world.hard_poses(),
         )
         if self.frame_sink is not None and frame is not None:
             self.frame_sink.append(frame)

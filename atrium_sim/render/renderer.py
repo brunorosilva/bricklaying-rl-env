@@ -15,8 +15,8 @@ import math
 
 import numpy as np
 
-from atrium_sim.blueprint import Blueprint, brick_face
-from atrium_sim.constants import H_MAX, TOL_MM
+from atrium_sim.blueprint import BrickKind, Blueprint, brick_face
+from atrium_sim.constants import COURSE_MM, H_MAX, TOL_MM
 from atrium_sim.physics import BrickPose
 
 SCALE = 0.5  # px per mm
@@ -37,6 +37,11 @@ LABEL = (200, 205, 215)
 ROBOT = (90, 170, 220)        # mobile gantry body
 ROBOT_DARK = (60, 120, 165)
 ROBOT_TOOL = (240, 200, 80)   # the descending tool / gripper
+CEMENT = (150, 148, 143)      # curved cement heads (arches) - the "hard material"
+STONE = (178, 172, 160)       # lintels / sills
+STONE_EDGE = (110, 108, 104)
+CENTERING = (120, 95, 60)     # temporary timber former - visible only until struck
+VOUSSOIR_FACE = (178, 92, 62)  # real structural arch voussoirs (dynamic bricks, not sensors)
 
 
 def _quality_color(d: float, in_tol: bool) -> tuple[int, int, int]:
@@ -54,8 +59,11 @@ class PygameRenderer:
         self.pygame = pygame
         self.blueprint = blueprint
         self.render_mode = render_mode
+        # viewport top is size-aware: tall facades (a 40-course pier, a 13-course house with
+        # arched heads) must fit, not just the old fixed H_MAX (6 courses). Leaves sky headroom.
+        self.y_top = max(Y_TOP_MM, blueprint.n_courses * COURSE_MM + 170.0)
         self.w_px = int((blueprint.length + 2 * MARGIN_MM) * SCALE)
-        self.h_px = HUD_H + int((Y_TOP_MM - Y_BOT_MM) * SCALE)
+        self.h_px = HUD_H + int((self.y_top - Y_BOT_MM) * SCALE)
         pygame.font.init()
         self.font = pygame.font.Font(None, 16)
         self.hud_font = pygame.font.Font(None, 20)
@@ -71,7 +79,7 @@ class PygameRenderer:
     # --- coordinate transform -------------------------------------------------
 
     def _to_px(self, x: float, y: float) -> tuple[float, float]:
-        return (x + MARGIN_MM) * SCALE, HUD_H + (Y_TOP_MM - y) * SCALE
+        return (x + MARGIN_MM) * SCALE, HUD_H + (self.y_top - y) * SCALE
 
     def _rect_corners(self, cx, cy, w, h, theta):
         c, s = math.cos(theta), math.sin(theta)
@@ -79,6 +87,13 @@ class PygameRenderer:
         for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
             pts.append(self._to_px(cx + dx * c - dy * s, cy + dx * s + dy * c))
         return pts
+
+    def _poly_corners(self, cx, cy, theta, local_verts):
+        """Generalizes _rect_corners to an ARBITRARY canonical polygon (e.g. a tapered arch
+        voussoir wedge, not just a box): rotate `local_verts` by theta, translate to (cx, cy),
+        return pixel coords - same contract as _rect_corners."""
+        c, s = math.cos(theta), math.sin(theta)
+        return [self._to_px(cx + lx * c - ly * s, cy + lx * s + ly * c) for lx, ly in local_verts]
 
     def _dashed_rect(self, color, cx, cy, w, h, dash=6):
         pg = self.pygame
@@ -97,7 +112,7 @@ class PygameRenderer:
     # --- main draw --------------------------------------------------------------
 
     def draw(self, poses: list[BrickPose], report, hud: dict, cursor: int,
-             robot: tuple | None = None) -> np.ndarray | None:
+             robot: tuple | None = None, hard_bodies: list | None = None) -> np.ndarray | None:
         pg = self.pygame
         surf = self.surface
         surf.fill(BG)
@@ -133,10 +148,40 @@ class PygameRenderer:
             else:
                 self._dashed_rect(GHOST, t.x, t.y, w, h)
 
+        # static hard bodies: lintels/sills/cement heads (permanent) and the arch centering/
+        # skewback (centering is temporary - visible only until the ring closes and it's struck;
+        # "voussoir" here is the older cosmetic lintel_soldier style's sensor fringe, kept
+        # distinct from the real dynamic VOUSSOIR bricks drawn below)
+        for _sid, kind, verts in (hard_bodies or []):
+            pts = [self._to_px(x, y) for x, y in verts]
+            if len(pts) < 3:
+                continue
+            if kind == "voussoir":
+                fill, edge = TERRACOTTA, MORTAR
+            elif kind == "centering":
+                fill, edge = CENTERING, (80, 60, 35)
+            elif kind == "skewback":
+                fill, edge = STONE, STONE_EDGE
+            elif kind == "cement":
+                fill, edge = CEMENT, STONE_EDGE
+            else:
+                fill, edge = STONE, STONE_EDGE
+            pg.draw.polygon(surf, fill, pts)
+            pg.draw.polygon(surf, edge, pts, 2)
+
         # bricks
         match_by_brick = {m.brick_id: m for m in report.matches}
         stray_ids = set(report.stray_bricks)
         for p in poses:
+            if p.kind == BrickKind.VOUSSOIR and p.verts:
+                # a real structural arch wedge: arbitrary polygon, not a fixed (w, h) box - not
+                # scored by the flat-wall audit (report never contains a VOUSSOIR match), so no
+                # quality tint/label; rendered as its own distinct material instead.
+                pts = self._poly_corners(p.x, p.y, p.theta, p.verts)
+                if len(pts) >= 3:
+                    pg.draw.polygon(surf, VOUSSOIR_FACE, pts)
+                    pg.draw.polygon(surf, MORTAR, pts, 2)
+                continue
             w, h = brick_face(p.kind)
             m = match_by_brick.get(p.brick_id)
             if m is not None:

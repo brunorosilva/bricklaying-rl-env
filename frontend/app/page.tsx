@@ -14,13 +14,14 @@ type Metrics = {
   frac_in_tol: number; frac_filled: number; waste_count: number;
   episode_return: number; mean_abs_dev_mm: number; placements: number; moves?: number;
 };
+type HardBody = { kind: string; appear: number; verts: [number, number][] };
 type Replay = {
   spec: { n_modules: number; n_courses: number };
   length: number; n_courses: number; n_targets: number;
   targets: Target[]; steps: Step[]; metrics: Metrics; seed: number; _policy?: string;
-  robot?: { reach: number };
+  robot?: { reach: number }; hard_bodies?: HardBody[];
 };
-type Frame = { st: Step; bricks: Brick[]; base?: number };
+type Frame = { st: Step; bricks: Brick[]; base?: number; gi: number };
 type View = { xmin: number; ymax: number; s: number; ox: number; oy: number };
 
 // ---- geometry / matching (mirrors atrium_sim reward + renderer) ----
@@ -61,8 +62,11 @@ function qualityColor(d: number, deg: number): string {
 function makeView(len: number, nCourses: number, W: number, H: number): View {
   const xmin = -MARGIN, xmax = len + MARGIN, ymin = -30, ymax = nCourses * 60 + 170;
   const worldW = xmax - xmin, worldH = ymax - ymin;
-  const s = Math.min(W / worldW, H / worldH);
-  return { xmin, ymax, s, ox: (W - worldW * s) / 2, oy: (H - worldH * s) / 2 };
+  // the HUD occupies the top HUD_H px, and py() offsets content down by it, so fit the
+  // scene into the REMAINING height - otherwise tall walls (facade panels) crop at the bottom
+  const availH = H - HUD_H;
+  const s = Math.min(W / worldW, availH / worldH);
+  return { xmin, ymax, s, ox: (W - worldW * s) / 2, oy: (availH - worldH * s) / 2 };
 }
 const px = (v: View, x: number) => v.ox + (x - v.xmin) * v.s;
 const py = (v: View, y: number) => HUD_H + v.oy + (v.ymax - y) * v.s;
@@ -117,6 +121,14 @@ function drawScene(canvas: HTMLCanvasElement, v: View, replay: Replay, frame: Fr
     if (filled.has(ti)) continue;
     const t = replay.targets[ti];
     poly(ctx, corners(v, t.x, t.y, t.w, t.h, 0), undefined, "#6e737d", true);
+  }
+
+  // static hard bodies (cement arches, lintels, sills) - faded in as the build reaches them
+  for (const hb of replay.hard_bodies ?? []) {
+    if (hb.appear > frame.gi) continue;
+    const pts = hb.verts.map(([x, y]) => [px(v, x), py(v, y)] as [number, number]);
+    const fill = hb.kind === "voussoir" ? "#b25c3e" : hb.kind === "cement" ? "#969690" : "#b2aca0";
+    poly(ctx, pts, fill, hb.kind === "voussoir" ? "#6a655f" : "#6e6c68");
   }
 
   // bricks
@@ -235,8 +247,9 @@ export default function Page() {
       if (d.error) { setStatus("error: " + d.error); return; }
       const replay = d as Replay; replay._policy = p;
       replayRef.current = replay;
+      let gi = 0;
       tlRef.current = replay.steps.flatMap((st) =>
-        st.ticks.map((bricks, j) => ({ st, bricks, base: st.base_ticks?.[j] })));
+        st.ticks.map((bricks, j) => ({ st, bricks, base: st.base_ticks?.[j], gi: gi++ })));
       curRef.current = 0;
       const cv = canvasRef.current!;
       viewRef.current = makeView(replay.length, replay.n_courses, cv.width, cv.height);

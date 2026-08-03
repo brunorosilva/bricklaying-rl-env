@@ -33,6 +33,8 @@ HERE = Path(__file__).parent
 INDEX = HERE / "index.html"
 RUNS_DIR = Path("runs")
 ROBOT_RUNS_DIR = Path("runs/robot")
+PLANS_DIR = Path("plans")
+HOUSE_PREFIX = "house:"
 
 
 def list_checkpoints() -> list[str]:
@@ -43,9 +45,23 @@ def list_checkpoints() -> list[str]:
 
 
 def list_robot_checkpoints() -> list[str]:
+    """Only checkpoints whose obs_dim matches the CURRENT robot env (the sensor obs).
+    Older grid-obs checkpoints (robot9-14) can't run against the new env, so hide them
+    rather than let a selection error out."""
     if not ROBOT_RUNS_DIR.exists():
         return []
-    return sorted(str(p.parent.name) for p in ROBOT_RUNS_DIR.glob("*/ckpt.pt"))
+    import torch
+
+    from atrium_sim.envs.robot_env import OBS_DIM
+    out = []
+    for p in sorted(ROBOT_RUNS_DIR.glob("*/ckpt.pt")):
+        try:
+            ck = torch.load(str(p), weights_only=True, map_location="cpu")
+            if int(ck.get("obs_dim", -1)) == OBS_DIM:
+                out.append(p.parent.name)
+        except Exception:
+            pass
+    return out
 
 
 def build_policy(name: str, env):
@@ -99,31 +115,59 @@ def build_robot_policy(name: str, env):
     raise ValueError(f"unknown robot policy: {name!r}")
 
 
-def _robot_drop_control(policy_name: str) -> bool:
-    """A drop-trained checkpoint stores drop_control in its args; the replay env must
-    match so the release-height mechanic reproduces (older checkpoints default False)."""
+def _robot_ckpt_flags(policy_name: str) -> dict:
+    """The mechanic flags a checkpoint was trained with, so replay reproduces them
+    (drop-height release, rail-edge fall). Older checkpoints default to off."""
     if not policy_name.startswith("ckpt:"):
-        return False
+        return {}
     try:
         import torch
 
         ck = torch.load(str(ROBOT_RUNS_DIR / policy_name[5:] / "ckpt.pt"),
                         weights_only=True, map_location="cpu")
-        return bool(ck.get("args", {}).get("drop_control", False))
+        a = ck.get("args", {})
+        return {"drop_control": bool(a.get("drop_control", False)),
+                "fall_off_edge": bool(a.get("fall_off_edge", False))}
     except Exception:
-        return False
+        return {}
+
+
+def list_house_plans() -> list[str]:
+    """Saved FacadePlans under plans/ that parse as buildable facades (image -> house)."""
+    if not PLANS_DIR.exists():
+        return []
+    from atrium_sim.facade import FacadePlan
+    out = []
+    for p in sorted(PLANS_DIR.glob("*.json")):
+        try:
+            if FacadePlan.from_json(p.read_text()).panels:
+                out.append(f"{HOUSE_PREFIX}{p.stem}")
+        except Exception:
+            pass
+    return out
+
+
+def _load_house_plan(spec_str: str):
+    """A FacadePlan if spec_str is 'house:<name>' (-> plans/<name>.json), else None."""
+    if not spec_str.startswith(HOUSE_PREFIX):
+        return None
+    from atrium_sim.facade import FacadePlan
+    return FacadePlan.from_json((PLANS_DIR / f"{spec_str[len(HOUSE_PREFIX):]}.json").read_text())
 
 
 def run_robot_episode(policy_name: str, seed: int, spec_str: str,
                       scenario: str = "empty") -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    drop = _robot_drop_control(policy_name)          # match the checkpoint's mechanic
+    flags = _robot_ckpt_flags(policy_name)           # match the checkpoint's mechanics
     prefill = 1.0 if scenario == "prefill" else 0.0  # force a random partial structure to complete
-    if drop or prefill:
-        u.env_cfg = type(u.env_cfg)(drop_control=drop, prefill_prob=prefill)
+    plan = _load_house_plan(spec_str)                # a whole facade/house instead of a single wall
+    if flags or prefill:
+        u.env_cfg = type(u.env_cfg)(prefill_prob=prefill, **flags)
     try:
         policy = build_robot_policy(policy_name, env)
+        if plan is not None:
+            return record_robot_trajectory(env, policy, seed=seed, plan=plan)
         return record_robot_trajectory(env, policy, seed=seed, spec=parse_spec(spec_str))
     finally:
         env.close()

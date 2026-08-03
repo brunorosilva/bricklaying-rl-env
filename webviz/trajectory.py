@@ -81,16 +81,35 @@ def record_trajectory(env, policy, seed: int | None = None, spec=None, scenario:
     }
 
 
-def record_robot_trajectory(env, policy, seed: int | None = None, spec=None) -> dict:
-    """Replay for the mobile robot: like record_trajectory, but also captures the
-    base position each frame (so the canvas can draw the base + reach window
-    sliding) and the mode (place/move) per step. A MOVE runs no physics, so it
-    contributes one frame at the new base position."""
+def record_robot_trajectory(env, policy, seed: int | None = None, spec=None, plan=None) -> dict:
+    """Replay for the mobile robot: like record_trajectory, but also captures the base
+    position each frame (so the canvas can draw the base + reach window sliding) and the mode
+    (place/move) per step. A MOVE runs no physics, so it contributes one frame at the new base.
+
+    A `plan` (FacadePlan) builds a whole facade/house instead of a single wall; the static hard
+    bodies (cement arches, lintels, sills) are captured once with the frame index at which they
+    first appear, so the canvas can fade them in as the build reaches them."""
     u = env.unwrapped
     flat: list[tuple[float, list]] = []  # (base_x, poses)
+    hard: list[dict] = []                # static bodies, recorded once with their appear-frame
+    seen: set[int] = set()
+
+    def _capture_hard():
+        for sid, kind, verts in u.world.hard_poses():
+            if sid not in seen:
+                seen.add(sid)
+                hard.append({"kind": kind, "appear": max(0, len(flat) - 1),
+                             "verts": [[round(x, 1), round(y, 1)] for x, y in verts]})
+
+    def _tick():
+        flat.append((round(u.base_x, 1), _snapshot(u.world)))
+        _capture_hard()
+
     try:
-        obs, info = env.reset(seed=seed, options={"spec": spec} if spec is not None else None)
-        u.tick_callback = lambda: flat.append((round(u.base_x, 1), _snapshot(u.world)))
+        options = ({"plan": plan} if plan is not None
+                   else ({"spec": spec} if spec is not None else None))
+        obs, info = env.reset(seed=seed, options=options)
+        u.tick_callback = _tick
         steps = []
         done = False
         step_i = 0
@@ -102,6 +121,7 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None) -> 
             done = terminated or truncated
             if len(flat) == start:  # a move (no settle) -> one frame at the new base
                 flat.append((round(u.base_x, 1), _snapshot(u.world)))
+                _capture_hard()
             chunk = flat[start:]
             steps.append({
                 "i": step_i, "mode": mode,
@@ -113,9 +133,13 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None) -> 
                 "ticks": [f[1] for f in chunk],
             })
             step_i += 1
+        _capture_hard()  # catch any hard bodies spawned in the final settle
     finally:
         u.tick_callback = None
 
+    # a big panel can hit the gym step cap (truncation) before the env terminates, so
+    # info has no "metrics" - rebuild them from the env's own terminal-info in that case
+    metrics = info.get("metrics") or u._info(terminal=True)["metrics"]
     return {
         "spec": {"n_modules": u.blueprint.spec.n_modules, "n_courses": u.blueprint.n_courses},
         "length": round(u.blueprint.length, 1),
@@ -123,7 +147,8 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None) -> 
         "n_targets": u.blueprint.n_targets,
         "targets": _targets_json(u.blueprint),
         "robot": {"reach": u.env_cfg.reach_mm},
+        "hard_bodies": hard,
         "steps": steps,
-        "metrics": {k: round(float(v), 4) for k, v in info["metrics"].items()},
+        "metrics": {k: round(float(v), 4) for k, v in metrics.items()},
         "seed": seed,
     }

@@ -54,6 +54,11 @@ class BrickPose(NamedTuple):
     y: float
     theta: float  # radians, unbounded (reward folds it)
     kind: BrickKind
+    verts: tuple[tuple[float, float], ...] | None = None
+    # The shape's actual LOCAL (body-frame, pre-rotation) vertices, straight from the pymunk
+    # shape - always populated. For FULL/HALF this is just the box verts (equivalent to
+    # brick_face(kind) but exact); for VOUSSOIR it's the true tapered wedge, which has no
+    # fixed (w, h) - the renderer needs this to draw anything other than a rectangle.
 
 
 class _Brick(NamedTuple):
@@ -88,12 +93,16 @@ class PhysicsWorld:
         space.add(ground)
         self.space = space
         self._bricks: dict[int, _Brick] = {}  # insertion-ordered -> deterministic solver order
+        self._statics: dict[int, tuple] = {}  # static hard bodies (lintels/cement/roof); never audited
         self._next_id = 0
 
     # --- spawning -----------------------------------------------------------
 
     def spawn_brick(self, x: float, kind: BrickKind, course: int,
-                    release_y: float | None = None) -> int | None:
+                    release_y: float | None = None, theta: float = 0.0,
+                    rest_y: float | None = None,
+                    wedge_verts: tuple[tuple[float, float], ...] | None = None,
+                    mass_kg: float | None = None) -> int | None:
         """Place a brick as a dynamic body and let it fall/settle.
 
         By default it spawns `SPAWN_DROP_MM` above rest height for `course` (the
@@ -105,16 +114,37 @@ class PhysicsWorld:
         NEVER injected (deep-overlap resolution flings bricks across the canvas).
         Returns the brick id, or None if no clear height exists below the
         ceiling - the caller charges that as a wasted placement.
+
+        `wedge_verts` (local, centroid-relative, at theta=0 - see atrium_sim.arch) overrides
+        the ordinary axis-aligned box shape with an arbitrary convex polygon, for real tapered
+        arch voussoirs. `theta` still applies on top (the target's intended orientation plus
+        any small agent error), exactly as it already does for the box path. `mass_kg`
+        overrides BRICK_MASS_KG (a wedge's true mass scales with its polygon area, not the
+        rectangular envelope's). None (both, default) is byte-identical to today.
         """
-        w, h = _envelope(kind)
-        verts = FULL_VERTS if kind == BrickKind.FULL else HALF_VERTS
-        moment = pymunk.moment_for_box(BRICK_MASS_KG, (w, h))
-        body = pymunk.Body(BRICK_MASS_KG, moment)
-        shape = pymunk.Poly.create_box(body, verts, radius=SHAPE_RADIUS)
+        mass = BRICK_MASS_KG if mass_kg is None else mass_kg
+        if wedge_verts is not None:
+            moment = pymunk.moment_for_poly(mass, wedge_verts)
+            body = pymunk.Body(mass, moment)
+            body.angle = float(theta)
+            shape = pymunk.Poly(body, wedge_verts, radius=SHAPE_RADIUS)
+        else:
+            w, h = _envelope(kind)
+            verts = FULL_VERTS if kind == BrickKind.FULL else HALF_VERTS
+            moment = pymunk.moment_for_box(mass, (w, h))
+            body = pymunk.Body(mass, moment)
+            body.angle = float(theta)
+            shape = pymunk.Poly.create_box(body, verts, radius=SHAPE_RADIUS)
         shape.friction = FRICTION_BRICK
         shape.elasticity = 0.0
 
-        gentle_y = COURSE_MM * course + h / 2.0 + SPAWN_DROP_MM
+        # rest_y (a voussoir's exact centre y) overrides the course-derived height; for a flat
+        # brick rest_y == its target y == COURSE_MM*course + h/2, so this is unchanged. A
+        # wedge has no fixed envelope height, so rest_y is mandatory whenever wedge_verts is
+        # given (the caller - atrium_sim.arch's targets always set it).
+        if rest_y is None and wedge_verts is not None:
+            raise ValueError("wedge_verts requires an explicit rest_y")
+        gentle_y = (rest_y if rest_y is not None else COURSE_MM * course + h / 2.0) + SPAWN_DROP_MM
         # release_y=None -> identical to the original fixed gentle drop; otherwise
         # honor the requested height but never start below gentle (the probe only
         # ever raises y, preserving the never-inject-overlap guarantee).
@@ -138,6 +168,53 @@ class PhysicsWorld:
         self._next_id += 1
         self._bricks[brick_id] = _Brick(body, shape, kind)
         return brick_id
+
+    def spawn_static_body(self, verts_mm, kind: str = "cement", sensor: bool = False) -> int:
+        """A monolithic STATIC obstacle (lintel / cement curve / roof cap): bricks rest on and
+        abut it, it never moves or topples, and it is NOT a brick - it never enters poses() or
+        the audit. `verts_mm` is a convex polygon in world mm. If `sensor`, the shape is
+        non-colliding (a decorative voussoir that bears on the piers without flinging them).
+        Returns its id."""
+        body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        shape = pymunk.Poly(body, [(float(x), float(y)) for x, y in verts_mm], radius=SHAPE_RADIUS)
+        shape.friction = FRICTION_BRICK
+        shape.elasticity = 0.0
+        shape.sensor = bool(sensor)
+        self.space.add(body, shape)
+        sid = self._next_id
+        self._next_id += 1
+        self._statics[sid] = (body, shape, kind)
+        return sid
+
+    def remove_static_body(self, sid: int) -> None:
+        """Strike a static body (a temporary arch centering) - the missing counterpart to
+        `spawn_static_body`. Once removed, whatever it was holding up (an arch ring) either
+        stands on its own or doesn't; this is the moment that decides."""
+        body, shape, _kind = self._statics.pop(sid)
+        self.space.remove(body, shape)
+
+    def contact_normal_impulse(self, brick_id: int) -> float:
+        """Sum of |horizontal component| of the normal impulse across every live contact on
+        this body, divided by DT -> an instantaneous force estimate (N, since masses are kg
+        and mm/s^2 accelerations here are actually consistent with N when mass is in kg and
+        distances in mm only if impulse is in kg*mm/s - this is kg*mm/s^2 = mN; callers divide
+        by 1000 for N, matching the in-session spike's convention). Used to measure REAL
+        springing thrust (and, via the caller pairing this with contact-point positions, the
+        thrust-line eccentricity for the middle-third check) instead of a closed-form guess."""
+        body = self._bricks[brick_id].body
+        total = 0.0
+
+        def _accum(arbiter: pymunk.Arbiter) -> None:
+            nonlocal total
+            total += abs(arbiter.total_impulse.x) / DT
+
+        body.each_arbiter(_accum)
+        return total
+
+    def hard_poses(self) -> list[tuple[int, str, list[tuple[float, float]]]]:
+        """(id, kind, world-space vertices) per static body - for the renderer only."""
+        return [(sid, kind, [tuple(body.local_to_world(v)) for v in shape.get_vertices()])
+                for sid, (body, shape, kind) in self._statics.items()]
 
     # --- settling -----------------------------------------------------------
 
@@ -183,7 +260,8 @@ class PhysicsWorld:
 
     def poses(self) -> list[BrickPose]:
         return [
-            BrickPose(bid, b.body.position.x, b.body.position.y, b.body.angle, b.kind)
+            BrickPose(bid, b.body.position.x, b.body.position.y, b.body.angle, b.kind,
+                      verts=tuple(b.shape.get_vertices()))
             for bid, b in self._bricks.items()
         ]
 

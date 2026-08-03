@@ -31,10 +31,13 @@ from atrium_sim.constants import (
 class BrickKind(IntEnum):
     FULL = 0
     HALF = 1
+    VOUSSOIR = 2   # a tapered arch wedge; see atrium_sim.arch. Has no fixed rectangular
+                   # face - its geometry is a per-target wedge_verts polygon, not (w, h).
 
 
 def brick_face(kind: BrickKind) -> tuple[float, float]:
-    """Rendered face (w, h) in mm for a brick kind."""
+    """Rendered face (w, h) in mm for a brick kind. Not meaningful for VOUSSOIR (which
+    carries its own wedge_verts) - callers must branch on kind before calling this."""
     return BRICK_FULL_MM if kind == BrickKind.FULL else BRICK_HALF_MM
 
 
@@ -47,11 +50,22 @@ class WallSpec:
 @dataclass(frozen=True)
 class BrickTarget:
     tid: int          # global target id (== index into Blueprint.targets)
-    course: int       # 0 = bottom
-    slot: int         # index within course, left to right
+    course: int       # 0 = bottom (voussoirs: the springing course, shared by the whole ring)
+    slot: int         # index within course, left to right (voussoirs: build_order position -
+                      # see atrium_sim.arch - NOT left-to-right x, since the ring builds
+                      # symmetrically from both springings toward the keystone)
     x: float          # face-centre x, mm
     y: float          # face-centre y, mm (envelope centre; course 0 rests on ground)
     kind: BrickKind
+    theta: float = 0.0  # target orientation, radians (0 = flat/level; nonzero for arch voussoirs
+                        # that radiate around a rounded opening)
+    wedge_verts: tuple[tuple[float, float], ...] | None = None
+                        # VOUSSOIR only: local (centroid-relative) polygon verts for the tapered
+                        # wedge shape, at theta=0 (physics.spawn_brick rotates by theta). None for
+                        # every FULL/HALF target (back-compat) - brick_face()/FULL_VERTS apply.
+    arch_id: int | None = None
+                        # VOUSSOIR only: which arch this wedge belongs to, for ring-closure and
+                        # strike-survival bookkeeping (multiple arches can be in flight at once).
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,92 @@ def generate_blueprint(spec: WallSpec) -> Blueprint:
         targets.extend(course)
         courses.append(tuple(course))
     return Blueprint(spec=spec, length=length, targets=tuple(targets), _courses=tuple(courses))
+
+
+def generate_house_blueprint(plan) -> Blueprint:
+    """One flat running-bond Blueprint spanning a whole facade grid, in GLOBAL mm.
+
+    A house is NOT N separate panels to the env (which consumes a single Blueprint): reuse
+    generate_blueprint per panel, offset its targets to global coords, and re-tid/re-slot by
+    (course, x). Opening cells are simply ABSENT (the deterministic tiler never tiled them),
+    so under level ordering the robot fills each course around the void. Courses may be ragged
+    (or empty, where an opening spans a whole row) - Blueprint._courses already allows that.
+
+    `plan` is any FacadePlan-like object (.panels, .grid_cols, .grid_rows); typed loosely to
+    avoid a blueprint<->facade import cycle.
+
+    A real structural arch's springer voussoirs physically OVERSAIL onto the pier/abutment at
+    the springing course (real masonry: the ring rests partly ON the pier, per BIA's abutment-
+    width rules) - the tiler's panels don't know this (they only carve out the plain
+    rectangular opening), so without filtering, an ordinary flat pier brick would be generated
+    at the exact same (course, x) the arch ring will occupy, and the two collide physically
+    the instant both try to exist there. `plan.arch_regions()` (if present) is consulted to
+    drop any flat target inside an arch's actual footprint at its springing course.
+
+    Each panel's running-bond PATTERN (even/odd - full bricks vs. half-ended) is chosen by the
+    panel's GLOBAL starting course, not its own local course 0 (which `generate_blueprint`
+    always treats as even). Two panels stacked directly on top of each other, tiled
+    independently, otherwise get bond parity that's arbitrary relative to each other - normally
+    a cosmetic-only mismatch (reported as `bond_violations`, never enforced), but with many
+    panels (e.g. an arch's tapered bands) it becomes common enough to matter: a panel whose
+    global start happens to be odd, still opening with an all-full "even" course, stacks two
+    unstaggered head-joint courses directly on top of each other - discovered in-session as a
+    real trigger for cascading topples, not just an aesthetic blemish."""
+    raw: list[tuple[int, float, float, BrickKind, float]] = []  # (course, x, y, kind, theta)
+    for p in plan.panels:
+        length = wall_length(p.spec.n_modules)
+        ox = p.origin_col * MODULE_MM
+        oy = COURSE_MM * p.origin_row
+        for local_c in range(p.spec.n_courses):
+            global_c = p.origin_row + local_c
+            y = 30.0 + COURSE_MM * local_c
+            for x, kind in _course_targets(global_c, p.spec.n_modules, length):
+                raw.append((global_c, ox + x, oy + y, kind, 0.0))
+    exclusions: list[tuple[int, float, float]] = []
+    if hasattr(plan, "arch_regions"):
+        for region in plan.arch_regions():
+            exclusions.extend(_arch_row_exclusions(region))
+    if exclusions:
+        # overlap by FULL BRICK WIDTH, not centroid: a brick's edge can foul the ring's
+        # footprint by a few mm even when its centroid sits outside the exclusion interval
+        # (discovered in-session - a centroid-only check let a brick spawn with its edge
+        # physically inside the ring's space, toppling it on settle).
+        raw = [
+            r for r in raw
+            if not any(
+                r[0] == c and not (r[1] + brick_face(r[3])[0] / 2.0 <= lo
+                                    or r[1] - brick_face(r[3])[0] / 2.0 >= hi)
+                for c, lo, hi in exclusions
+            )
+        ]
+    raw.sort(key=lambda r: (r[0], r[1]))
+    courses: list[list[BrickTarget]] = [[] for _ in range(plan.grid_rows)]
+    targets: list[BrickTarget] = []
+    for tid, (course, x, y, kind, theta) in enumerate(raw):
+        nt = BrickTarget(tid=tid, course=course, slot=len(courses[course]), x=x, y=y,
+                         kind=kind, theta=theta)
+        targets.append(nt)
+        courses[course].append(nt)
+    spec = WallSpec(plan.grid_cols, plan.grid_rows)
+    length = plan.grid_cols * MODULE_MM
+    return Blueprint(spec=spec, length=length, targets=tuple(targets),
+                     _courses=tuple(tuple(c) for c in courses))
+
+
+def _arch_row_exclusions(region) -> list[tuple[int, float, float]]:
+    """[(course, x_lo, x_hi), ...]: every (course, x-range) an arch's ring physically occupies,
+    course by course from the springing upward - see atrium_sim.arch.ring_row_spans for why a
+    single-row exclusion isn't enough (the ring generally oversails onto the pier across
+    several courses near its base, not just the springing course). `region` is any
+    ArchRegion-like object (.spec, .origin_x, .springing_course); typed loosely, same reasoning
+    as generate_house_blueprint's `plan`."""
+    from atrium_sim.arch import ring_row_spans
+
+    out = []
+    for row, intervals in ring_row_spans(region.spec).items():
+        for lo, hi in intervals:
+            out.append((region.springing_course + row, region.origin_x + lo, region.origin_x + hi))
+    return out
 
 
 # --- Spec suites -------------------------------------------------------------

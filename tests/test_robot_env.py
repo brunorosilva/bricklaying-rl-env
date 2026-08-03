@@ -12,6 +12,7 @@ from gymnasium.utils.env_checker import check_env
 import atrium_sim  # noqa: F401
 from atrium_sim.blueprint import WallSpec
 from atrium_sim.envs.robot_env import OBS_DIM, Mode
+from atrium_sim.facade import FacadePlan, Opening
 from baselines.robot_oracle import RobotOraclePolicy
 
 
@@ -54,7 +55,7 @@ def test_moving_is_required_and_costs():
     obs, _ = env.reset(seed=1, options={"spec": WallSpec(8, 5)})
     u = env.unwrapped
     assert u.blueprint.length > u.env_cfg.reach_mm  # unreachable from a fixed base
-    _, reward, *_ = env.step((int(Mode.MOVE_RIGHT), np.array([0.0, -0.5], np.float32)))
+    _, reward, *_ = env.step((int(Mode.MOVE_RIGHT), np.array([0.0, 0.0, -0.5], np.float32)))
     assert reward < 0  # a move earns nothing, only costs
     assert u.moves == 1 and u.base_x == u.env_cfg.move_step_mm
     env.close()
@@ -77,11 +78,35 @@ def test_oracle_completes_by_moving(spec):
     env.close()
 
 
+def test_oracle_completes_arch_plan():
+    """A real structural arch (jack style, on a centering, struck once the ring closes) must
+    be end-to-end solvable: piers -> springer/skewback -> voussoirs in build order -> auto-
+    strike -> ring survives -> flat coursing resumes above it -> full wall, exactly like the
+    flat-wall oracle tripwire above but exercising the arch machinery in facade.py/arch.py/
+    robot_env.py end to end."""
+    o = Opening("window", col=1, row=1, n_cols=2, n_rows=4,
+                has_lintel=False, has_sill=False, arch_style="jack", arch_ring_courses=2)
+    plan = FacadePlan.from_perception("t", 5, 6, [o])
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    policy = RobotOraclePolicy(env)
+    obs, _ = env.reset(seed=2, options={"plan": plan})
+    done = False
+    while not done:
+        obs, r, term, trunc, info = env.step(policy.act(obs))
+        done = term or trunc
+    m = info["metrics"]
+    assert m["frac_filled"] == 1.0
+    assert m["frac_in_tol"] >= 0.9
+    assert m["ring_closure"] == 1.0
+    assert m["arch_strike_survival"] == 1.0
+    env.close()
+
+
 # --- drop-control (model-chosen release height) -----------------------------
 
-def _run_place_only(box1: float, drop_control: bool):
+def _run_place_only(box2: float, drop_control: bool):
     """Build a 2x2 wall (fully within reach from base 0) with PLACE-only actions,
-    box[1]=box1. Returns (total_reward, frac_filled, settled poses) for comparison."""
+    box[2]=box2 (release height). Returns (total_reward, frac_filled, settled poses)."""
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(
         random_start=False, drop_control=drop_control)
@@ -89,7 +114,8 @@ def _run_place_only(box1: float, drop_control: bool):
     u = env.unwrapped
     total, done = 0.0, False
     while not done:
-        _, r, term, trunc, info = env.step((int(Mode.PLACE), np.array([0.0, box1], np.float32)))
+        _, r, term, trunc, info = env.step(
+            (int(Mode.PLACE), np.array([0.0, 0.0, box2], np.float32)))
         total += r
         done = term or trunc
     poses = tuple((round(p.x, 3), round(p.y, 3)) for p in u.world.poses())
@@ -97,13 +123,14 @@ def _run_place_only(box1: float, drop_control: bool):
     return round(total, 6), info["metrics"]["frac_filled"], poses
 
 
-def test_drop_control_off_box1_inert():
-    """With drop_control off, box[1] must have zero effect (it's the vestigial kind dim)."""
+def test_drop_control_off_box2_inert():
+    """With drop_control off, box[2] must have zero effect (release height only applies
+    in drop_control mode)."""
     assert _run_place_only(1.0, drop_control=False) == _run_place_only(-1.0, drop_control=False)
 
 
 def test_drop_gentle_reproduces_fixed_drop():
-    """drop_control on with box[1]=+1 (arm fully lowered) == the fixed gentle drop."""
+    """drop_control on with box[2]=+1 (arm fully lowered) == the fixed gentle drop."""
     assert _run_place_only(1.0, drop_control=False) == _run_place_only(1.0, drop_control=True)
 
 
@@ -112,7 +139,7 @@ def test_drop_control_shapes_unchanged():
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(drop_control=True)
     obs, _ = env.reset(seed=1)
-    assert env.action_space.spaces[1].shape == (2,)
+    assert env.action_space.spaces[1].shape == (3,)
     assert obs.shape == (OBS_DIM,)
     env.close()
 
@@ -146,7 +173,7 @@ def test_prefill_is_stable_and_completable():
 def test_fall_off_edge():
     """fall_off_edge on: commanding a move further off an edge topples the gantry
     (terminates). Off (default): the move just clamps and the episode continues."""
-    mv_left = (int(Mode.MOVE_LEFT), np.array([0.0, 0.0], np.float32))
+    mv_left = (int(Mode.MOVE_LEFT), np.array([0.0, 0.0, 0.0], np.float32))
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     env.unwrapped.env_cfg = type(env.unwrapped.env_cfg)(fall_off_edge=True, random_start=False)
     env.reset(seed=1, options={"spec": WallSpec(4, 3)})
@@ -163,7 +190,7 @@ def test_fall_off_edge():
 
 
 def test_release_height_monotone_and_endpoints():
-    """box[1]=+1 -> gentle height; box[1]=-1 -> arm top; strictly monotone between."""
+    """box[2]=+1 -> gentle height; box[2]=-1 -> arm top; strictly monotone between."""
     from atrium_sim.constants import COURSE_MM, SPAWN_DROP_MM
 
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
@@ -172,7 +199,7 @@ def test_release_height_monotone_and_endpoints():
     env.reset(seed=1, options={"spec": WallSpec(4, 3)})
     gentle = COURSE_MM * 0.5 + SPAWN_DROP_MM
     top = COURSE_MM * u.blueprint.n_courses + u.env_cfg.arm_margin_mm
-    rh = lambda b1: u._release_height(0, np.array([0.0, b1], np.float32))
+    rh = lambda b2: u._release_height(0, np.array([0.0, 0.0, b2], np.float32))
     assert rh(1.0) == pytest.approx(gentle)
     assert rh(-1.0) == pytest.approx(top)
     assert rh(1.0) < rh(0.0) < rh(-1.0)

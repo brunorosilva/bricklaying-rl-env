@@ -74,6 +74,14 @@ MATCH_GATE_RAD = math.radians(15.0)
 # ~unlearnable variant kept for comparison).
 OFFSET_RANGE_MM = 15.0
 
+# Voussoir tilt nudge (arch placement mode): the agent's dtheta action spans +-this many
+# degrees around a voussoir target's intended radial orientation. Grounded in-session (real
+# tapered-wedge arch physics spike): a closed, symmetrically-built ring is fully stable through
+# +-4deg of off-radial error per voussoir and degrades gracefully (not catastrophically) out to
+# +-8deg (still standing at 5/5 seeds) - so the action range covers the whole graceful-
+# degradation zone rather than only the perfect point or only the failure zone.
+VOUSSOIR_TILT_RANGE_DEG = 8.0
+
 # --- Mobile robot (BrickLayerRobot-v0) ---
 # The robot sits on a rail and can only reach slots within REACH_MM of its base.
 # REACH < a typical wall, so completing the wall REQUIRES moving - that's the

@@ -25,7 +25,7 @@ from atrium_sim.blueprint import _SUITES, SIZE_LADDER, frontier_specs
 from train.agent import HybridAgent, HybridAgentPolicy, save_hybrid_checkpoint
 from train.ppo import compute_gae
 
-N_MODES, BOX_DIM = 3, 2
+N_MODES, BOX_DIM = 3, 3  # [x-offset, tilt-nudge (VOUSSOIR placements only), release-height]
 
 
 @dataclass
@@ -51,6 +51,12 @@ class Args:
     max_grad_norm: float = 0.5
     arch: str = "mlp"
     torch_threads: int = 0
+    async_envs: bool = False    # AsyncVectorEnv (one subprocess per env) instead of the default
+                                # single-process SyncVectorEnv. When curriculum is also on, the
+                                # shared level holder is upgraded to a multiprocessing.Manager
+                                # dict so level advances still reach every worker (a plain dict
+                                # would be copied into each subprocess at startup and never see
+                                # later updates from the main process).
     device: str = "cpu"         # "cuda" to train on GPU (helps the matmul-bound
                                 # transformer/cnn archs; MLPs stay env-bound so cpu is fine)
     random_start: bool = False  # False = base always starts at the left end (robot8): the
@@ -86,12 +92,20 @@ class Args:
     advance_patience: int = 2        # ... for this many consecutive evals in a row
     curriculum_cap: int = 3          # don't advance past this rung (3 = 10x6), so the held-out
                                      # bigger eval walls stay genuinely out-of-distribution
+    arch_prob_max: float = 0.0       # cap on the fraction of curriculum episodes that build a
+                                     # real structural arch (atrium_sim.facade.sample_arch_plan)
+                                     # instead of a flat WallSpec. 0.0 (default) = no arches, the
+                                     # exact prior behavior. Requires --curriculum (arches ride
+                                     # the same competence-gated size schedule: bigger/harder
+                                     # styles only become reachable at higher rungs).
+    arch_prob_per_level: float = 0.05  # arch_prob ramps by this much per curriculum rung
 
 
 def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
              drop_control: bool = False, drop_penalty_frac: float = 0.0,
              prefill_prob: float = 0.0, fall_off_edge: bool = False,
-             curriculum: dict | None = None):
+             curriculum: dict | None = None, arch_prob_max: float = 0.0,
+             arch_prob_per_level: float = 0.05):
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
@@ -103,12 +117,16 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
         # prefill_prob: some episodes start with a random partial structure to complete.
         # curriculum (a shared {"level": int} holder, or None): when set, the env samples the
         # wall size from the curriculum frontier instead of the fixed suite.
+        # arch_prob_max/arch_prob_per_level: a ramping fraction of curriculum episodes build a
+        # real structural arch (see RobotEnvConfig.arch_prob_*) instead of a flat WallSpec.
         u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
                                     drop_control=drop_control,
                                     drop_penalty_frac=drop_penalty_frac,
                                     prefill_prob=prefill_prob,
                                     fall_off_edge=fall_off_edge,
-                                    curriculum=curriculum is not None)
+                                    curriculum=curriculum is not None,
+                                    arch_prob_max=arch_prob_max,
+                                    arch_prob_per_level=arch_prob_per_level)
         # softer collapse/waste penalties so the agent is less "afraid" to attempt
         # the hard last bricks (top course, half-brick ends); precision plateau unchanged
         u.reward_cfg = type(u.reward_cfg)(
@@ -155,6 +173,48 @@ def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: floa
     return out
 
 
+# Held-out arch-eval facades (jack, oracle-validated ring_closure=1/survival=1) - deliberately
+# DISTINCT sizes from atrium_sim.facade.ARCH_PLAN_SPECS (which sample_arch_plan draws training
+# episodes from), so eval_arch/* genuinely measures generalization to unseen arch geometry,
+# mirroring how eval_suite is held out from the flat-wall training suite.
+_ARCH_EVAL_SPECS = (
+    ("jack", 2, 1, 2, 3, 3, 6, 5),
+    ("jack", 3, 0, 1, 2, 2, 5, 3),
+    ("semicircular", 2, 1, 2, 6, 3, 6, 8),
+    ("segmental", 2, 0, 3, 8, 3, 7, 9),
+)
+
+
+def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigma_deg: float,
+                        random_start: bool) -> dict:
+    """Same shape as evaluate_robot, but on held-out ARCH-BEARING facades - tracks whether the
+    arch mechanic itself (ring closure, strike survival) is being learned, not just flat-wall
+    fill/precision."""
+    from atrium_sim.facade import FacadePlan, Opening
+
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    u = env.unwrapped
+    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg)
+    policy = HybridAgentPolicy(agent)
+    keys = ("frac_filled", "frac_in_tol", "ring_closure", "arch_strike_survival")
+    acc = {k: [] for k in keys}
+    for i in range(episodes):
+        style, col, row, n_cols, n_rows, ring, gc, gr = _ARCH_EVAL_SPECS[i % len(_ARCH_EVAL_SPECS)]
+        o = Opening("window", col=col, row=row, n_cols=n_cols, n_rows=n_rows,
+                    has_lintel=False, has_sill=False, arch_style=style, arch_ring_courses=ring)
+        plan = FacadePlan.from_perception("eval", gc, gr, [o])
+        obs, _ = env.reset(seed=20000 + i, options={"plan": plan})
+        done = False
+        while not done:
+            obs, r, term, trunc, info = env.step(policy.act(obs))
+            done = term or trunc
+        for k in keys:
+            acc[k].append(info["metrics"][k])
+    env.close()
+    return {k: float(np.mean(v)) for k, v in acc.items()}
+
+
 def main(args: Args) -> dict:
     batch_size = args.num_envs * args.num_steps
     minibatch_size = batch_size // args.num_minibatches
@@ -180,14 +240,26 @@ def main(args: Args) -> dict:
     if args.torch_threads > 0:
         torch.set_num_threads(args.torch_threads)
 
-    # curriculum: a single mutable holder shared by reference across all envs (single-process
-    # SyncVectorEnv), advanced by the trainer as frontier competence rises. None = fixed suite.
-    curriculum = {"level": args.start_level} if args.curriculum else None
+    # curriculum: a mutable holder shared across all envs, advanced by the trainer as frontier
+    # competence rises. None = fixed suite. Under SyncVectorEnv (single process) a plain dict
+    # shared by reference is enough; under AsyncVectorEnv each env lives in its own subprocess,
+    # so a plain dict would be pickled as a disconnected COPY at startup and never see later
+    # updates - a multiprocessing.Manager dict (a proxy that really does cross the process
+    # boundary) is required instead.
+    if args.curriculum and args.async_envs:
+        import multiprocessing
+
+        curriculum = multiprocessing.Manager().dict({"level": args.start_level})
+    elif args.curriculum:
+        curriculum = {"level": args.start_level}
+    else:
+        curriculum = None
     above_frontier = 0  # consecutive evals whose frontier frac_filled >= advance_threshold
-    envs = gym.vector.SyncVectorEnv(
+    vec_cls = gym.vector.AsyncVectorEnv if args.async_envs else gym.vector.SyncVectorEnv
+    envs = vec_cls(
         [make_env(args.suite, args.sigma_mm, args.sigma_deg, args.random_start,
                   args.drop_control, args.drop_penalty_frac, args.prefill_prob,
-                  args.fall_off_edge, curriculum)
+                  args.fall_off_edge, curriculum, args.arch_prob_max, args.arch_prob_per_level)
          for _ in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
@@ -327,6 +399,12 @@ def main(args: Args) -> dict:
             n_evals += 1
             for k, v in last_eval.items():
                 writer.add_scalar(f"eval/{k}", v, global_step)
+            last_eval_arch = None
+            if args.arch_prob_max > 0.0:
+                last_eval_arch = evaluate_robot_arch(agent, args.eval_episodes, args.sigma_mm,
+                                                     args.sigma_deg, args.random_start)
+                for k, v in last_eval_arch.items():
+                    writer.add_scalar(f"eval_arch/{k}", v, global_step)
             if curriculum is not None:
                 # measure competence at the CURRENT frontier and advance a rung when it's
                 # mastered (the fixed eval_suite above stays the held-out generalization metric)
@@ -366,11 +444,16 @@ def main(args: Args) -> dict:
                     genv.close()
                 except Exception as e:
                     print(f"gif capture failed: {e}")
+            arch_msg = ""
+            if last_eval_arch is not None:
+                arch_msg = (f"  arch ring {last_eval_arch['ring_closure']:.2%} "
+                           f"survive {last_eval_arch['arch_strike_survival']:.2%} "
+                           f"filled {last_eval_arch['frac_filled']:.2%}")
             print(f"update {update}/{num_updates}  step {global_step}  SPS {sps}  "
                   f"eval in-tol {last_eval.get('frac_in_tol', 0):.2%}  "
                   f"filled {last_eval.get('frac_filled', 0):.2%}  "
                   f"completed {last_eval.get('completed', 0):.2%}  "
-                  f"return {last_eval.get('episode_return', 0):+.2f}", flush=True)
+                  f"return {last_eval.get('episode_return', 0):+.2f}" + arch_msg, flush=True)
 
     save_hybrid_checkpoint(agent, str(run_path / "ckpt.pt"), extra={"args": vars(args)})
     envs.close()

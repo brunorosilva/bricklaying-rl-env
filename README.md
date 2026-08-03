@@ -90,6 +90,27 @@ drop-height task, the ranking was **every 100%-completing backbone is an MLP var
 they run on the GPU and still lose to a two-layer MLP on this sample-starved, physics-bound
 env. The bottleneck was always the *problem shaping*, not the network.
 
+### Structural arches: rings, centering, and the strike (`robot17`)
+
+A brick wall with a window needs more than a hole — the courses above the opening have to
+*span* it. `robot17` adds real masonry arches: a curved ring of tapered **voussoirs** built
+in from both springings to the keystone on a static **centering** (temporary formwork), the
+centering removed once the ring closes, and the ring judged on whether it **survives its own
+strike** (drift/tilt thresholds, not just "did the bricks land") — same reward-is-the-audit
+principle as the flat wall, extended to arch statics. `atrium_sim/arch.py` supplies the
+geometry (three styles — semicircular, segmental, jack — via the Couplet/Heyman thickness
+ratio) and `atrium_sim/facade.py` turns a plan's `Opening`s into the pier targets, ring
+targets, and the lintel/sill/centering hard bodies around them:
+
+![robot17 building a UK terrace elevation with three arch styles](media/robot17_uk_house.gif)
+
+Isolated, single-arch spans are solid: ring closure and strike survival hit 1.0 on the
+semicircular and segmental styles zero-shot. Honest gap, in the same spirit as `robot11`'s
+10×6 failure above: on a full multi-arch facade like this one the robot still **stalls well
+short of finishing** — exactly the kind of out-of-distribution breakdown that took `robot16`
+several diagnosed root causes to fix for plain walls. That diagnosis (why it stops, not just
+that it stops) is the active thread — see the roadmap.
+
 ---
 
 ## Earlier: model-controlled drop height (`robot11`)
@@ -206,6 +227,8 @@ solvability tripwire.
 ```
 atrium_sim/           the environment package (installable, torch-free)
   blueprint.py        wall specs -> target layouts (train/interp/extrap/robot suites)
+  facade.py           FacadePlan: openings/panels/arches -> a whole-house blueprint
+  arch.py             arch geometry: wedges, ring build order, strike survival
   physics.py          PyMunk world: spawn, settle-by-sleeping, out-of-bounds
   reward.py           the audit: matching, quality, potential  <- start here
   observations.py     slot tensor + globals -> vector in [-1,1]
@@ -261,9 +284,11 @@ connected panels**; then the robot fills a whole facade the way it fills a singl
 - ~~Model-controlled drop height~~ ✅ **done** — sub-mm precision via physics (though
   `robot16` reaches 100% within ±3mm without it, so it's a nice-to-have now). Open thread:
   pin down *why* a hard drop yields sub-mm placement (a forced-gentle vs forced-hard ablation).
-- ~~Image/VLM → buildable plan~~ ✅ **v1 done** (facade section above). Next: openings +
-  lintels in the *env* so the robot fills a whole facade — the window void *and* the
-  brickwork above it — the way it fills a single wall.
+- ~~Image/VLM → buildable plan~~ ✅ **v1 done** (facade section above).
+- ~~Openings + lintels in the env~~ ✅ **v1 done** — structural arches (voussoir rings,
+  centering, strike survival, see above). Next: diagnose *why* a full multi-arch facade
+  still stalls (root-cause it the way `robot16`'s generalization plateau was root-caused,
+  not just thrown more training steps) and make it reliably buildable end-to-end.
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
 - GRPO (`Agent(critic=False)` seam is already in place).
