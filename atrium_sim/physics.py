@@ -127,6 +127,15 @@ class PhysicsWorld:
             moment = pymunk.moment_for_poly(mass, wedge_verts)
             body = pymunk.Body(mass, moment)
             body.angle = float(theta)
+            # radius=SHAPE_RADIUS, same as the box path: pymunk's Poly radius is a Minkowski
+            # round (it grows the true collision surface outward by this much on every edge),
+            # and that small rounding is what keeps adjacent-wedge and ring-strike contacts
+            # numerically stable (confirmed: radius=0 here destabilizes the ring itself - a
+            # jack ring that survives its strike at radius=SHAPE_RADIUS collapses at 22.6mm
+            # drift at radius=0). Because it grows the collision surface, callers that need
+            # the ring's TRUE outer boundary (facade.ArchRegion.crown_packing_hard_body) must
+            # add SHAPE_RADIUS to the raw wedge-vertex geometry themselves, rather than this
+            # method compensating for them - the ring's own joints don't need that undone.
             shape = pymunk.Poly(body, wedge_verts, radius=SHAPE_RADIUS)
         else:
             w, h = _envelope(kind)
@@ -192,6 +201,17 @@ class PhysicsWorld:
         stands on its own or doesn't; this is the moment that decides."""
         body, shape, _kind = self._statics.pop(sid)
         self.space.remove(body, shape)
+
+    def remove_brick(self, brick_id: int) -> None:
+        """Forcibly remove a dynamic brick - the give-up path. A brick that repeatedly fails
+        to seat (tilt/drift ratchet past the match gate) is left in the world as a stray,
+        physically blocking the spawn probe from ever finding a clear height at that slot
+        again (confirmed: 500+ wasted steps hammering one target). The caller charges this
+        as waste and abandons the target; without this method there is no way to clear the
+        blockage short of a wall collapse."""
+        if brick_id in self._bricks:
+            brick = self._bricks.pop(brick_id)
+            self.space.remove(brick.body, brick.shape)
 
     def contact_normal_impulse(self, brick_id: int) -> float:
         """Sum of |horizontal component| of the normal impulse across every live contact on

@@ -199,14 +199,25 @@ def audit(
     *,
     off_canvas: int = 0,
     halves_used: int = 0,
+    exempt_brick_ids: frozenset[int] = frozenset(),
 ) -> AuditReport:
     """Score a settled wall. Pure geometry: no sim access, no RNG, no learning.
 
     `off_canvas` (bricks that fell off and were removed, plus skipped spawns)
     and `halves_used` (total half-brick placements attempted) are episode
     counters owned by the environment.
+
+    `exempt_brick_ids`: bricks that are correctly placed but structurally outside this
+    audit's scope - concretely, VOUSSOIRs. `blueprint.targets` holds no VOUSSOIR targets
+    (a real arch ring isn't course-aligned, so it lives in the env's own separate pool -
+    see atrium_sim.envs.robot_env), so `match_bricks`'s kind filter can never match one to
+    anything: every correctly-seated voussoir would otherwise be counted as a stray and
+    charged `c_waste` per brick, forever (confirmed: this was the single most influential
+    input to the trained policy's mode head, and past ~1/3 stray_frac it locked the policy
+    into permanently avoiding PLACE even with a flat target in reach).
     """
     raw_matches, missing, strays = match_bricks(bricks, blueprint, cfg)
+    strays = [b for b in strays if b not in exempt_brick_ids]
     n = blueprint.n_targets
 
     matches = tuple(

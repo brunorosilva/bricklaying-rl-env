@@ -74,3 +74,24 @@ def test_json_round_trip():
     plan = FacadePlan.from_perception(
         "x", 30, 20, [Opening("window", 5, 5, 6, 6), Opening("door", 20, 0, 4, 10)])
     assert FacadePlan.from_json(plan.to_json()).to_json() == plan.to_json()
+
+
+@pytest.mark.parametrize("style", ["semicircular", "segmental"])
+def test_crown_packing_lands_on_the_course_line(style):
+    """crown_packing_hard_body's top face must land EXACTLY on the crown course's bottom
+    edge (COURSE_MM * crown_course), with no vertical inset. A vertical inset here would
+    leave every crown-course brick's target resting on nothing, which the spawn probe then
+    "fixes" by lifting the brick into a tilt bad enough to blow the match-angle gate
+    (confirmed: a -6mm inset was capping the whole crown course out of tolerance)."""
+    from atrium_sim.constants import COURSE_MM
+
+    o = Opening("window", col=2, row=0, n_cols=3, n_rows=8, has_lintel=False, has_sill=False,
+                arch_style=style, arch_ring_courses=2)
+    plan = FacadePlan.from_perception("t", 7, 9, [o])
+    regions = list(plan.arch_regions())
+    assert len(regions) == 1
+    region = regions[0]
+    pkg = region.crown_packing_hard_body()
+    assert pkg is not None, f"{style}: expected the ring to fall short of the crown line"
+    top_y = max(y for _, y in pkg.verts_mm)
+    assert top_y == pytest.approx(COURSE_MM * region.crown_course)

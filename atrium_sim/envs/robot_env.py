@@ -71,7 +71,15 @@ from atrium_sim.reward import AuditReport, RewardConfig, audit, potential
 # rail position/edges, direction to work, progress. Size-agnostic: identical shape for a
 # 4x3 wall or a 40-course pier. See _obs().
 _ERR_NORM_MM = 30.0   # dx/dy sensor normaliser (full resolution around +-3mm, clips at +-30)
-OBS_DIM = 22   # +2 over the pre-arch 20: "next target is a voussoir", "active arch ring closure"
+_REACH_SHAPING_CAP_MM = 2000.0   # _reach_potential's normalizer - a fixed, reach-scale distance
+                                  # (4x REACH_MM), not wall length, so a move is worth the same
+                                  # shaping reward on every wall size (see _reach_potential)
+OBS_DIM = 28   # +6 over the pre-stall-fix 22: far-field walking distance, last-PLACE-invalid,
+              # consecutive-invalid streak, and the 3-mode action mask (mask_place/left/right -
+              # see train.agent.HybridAgent.mask_dim, which reads these as the LAST mask_dim
+              # columns rather than a separate info key). Also invalidates every older
+              # checkpoint's obs_dim (robot16 already didn't load at 20; this moves the
+              # boundary to 22).
 
 
 class Mode(IntEnum):
@@ -86,9 +94,14 @@ class RobotEnvConfig:
     move_step_mm: float = MOVE_STEP_MM
     offset_range_mm: float = OFFSET_RANGE_MM
     move_cost_frac: float = MOVE_COST_FRAC
-    invalid_place_frac: float = 0.0   # softened to 0: reach-shaping supplies the move
-                                      # incentive, so we no longer punish PLACE-when-stuck
-                                      # (that was teaching the policy "placing is bad")
+    invalid_place_frac: float = 0.02  # was softened to 0.0 - reach-shaping alone was meant to
+                                      # supply the move incentive, so PLACE-when-stuck went
+                                      # unpunished (avoiding teaching "placing is bad"). With
+                                      # PLACE now MASKED whenever nothing is reachable (see
+                                      # train.agent's mask_dim), this only ever fires for an
+                                      # untrained/exploring/mask-ignoring actor - a small,
+                                      # ramped (see _do_place) belt-and-braces cost rather than
+                                      # the primary anti-stall lever, which the mask now is.
     c_reach: float = 0.5              # potential-based shaping: dense reward for moving the
                                       # base toward the nearest unplaced target (Ng et al.;
                                       # optimal-policy-invariant). Supplies the directional
@@ -157,6 +170,20 @@ class RobotEnvConfig:
                                       # only become reachable at higher rungs anyway (see
                                       # sample_arch_plan's own grid-size gate), so this mirrors
                                       # that ramp in HOW OFTEN arches appear, not just WHICH ones.
+    scenario_mix: float = 0.0        # fraction of episodes drawn from the oracle-gated scenario
+                                      # library (atrium_sim.scenarios.sample) instead of the size/
+                                      # arch curriculum - isolated skill practice (a known exact
+                                      # walking distance, a void wider than reach, a ragged multi-
+                                      # opening course, ...) alongside the general curriculum, the
+                                      # same "mixed in, never replacing" pattern as arch_prob_*.
+                                      # 0.0 (default) is byte-identical to before this existed.
+    max_place_attempts: int = 3      # give-up threshold: a target that fails to seat (spawn
+                                      # blocked, or placed but out of the match gate) this many
+                                      # CONSECUTIVE times is abandoned - any lingering stray
+                                      # brick is removed and the target is excluded from future
+                                      # candidates. Without this a genuinely unbuildable slot
+                                      # (e.g. a physics defect right above an arch) is offered
+                                      # forever: confirmed 500+ wasted steps hammering one target.
 
 
 class BrickLayerRobotEnv(gym.Env):
@@ -190,12 +217,25 @@ class BrickLayerRobotEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
-        plan = (options or {}).get("plan")
-        explicit_spec = (options or {}).get("spec")
+        opts = dict(options or {})
+        plan = opts.get("plan")
+        explicit_spec = opts.get("spec")
         level = None
         if self.env_cfg.curriculum:
             holder = getattr(self, "_curriculum", None)
             level = holder["level"] if holder else 0
+        # scenario library draw: only when the CALLER hasn't already pinned a plan/spec (an
+        # explicit options= from a test, webviz replay, or a previous draw this same reset -
+        # this only ever runs once). Merges the scenario's own options (plan/spec and possibly
+        # prefill_tids/base_x) into `opts` so the prefill/base_x reads below pick them up
+        # exactly as if the caller had passed them directly.
+        if plan is None and explicit_spec is None and self.env_cfg.scenario_mix > 0.0:
+            if float(self.np_random.random()) < self.env_cfg.scenario_mix:
+                from atrium_sim.scenarios import sample as sample_scenario
+
+                opts.update(sample_scenario(self.np_random))
+                plan = opts.get("plan")
+                explicit_spec = opts.get("spec")
         if plan is None and explicit_spec is None and self.env_cfg.curriculum:
             # ramping frequency (see RobotEnvConfig.arch_prob_*): a fraction of curriculum
             # episodes build an arch-bearing facade instead of a flat WallSpec, so training
@@ -253,8 +293,14 @@ class BrickLayerRobotEnv(gym.Env):
         }
         self.world = PhysicsWorld(self.blueprint.length)
         traversal = int(np.ceil(self.blueprint.length / self.env_cfg.move_step_mm))
-        # base start: random module-aligned position (forces bidirectional movement)
-        if self.env_cfg.random_start:
+        base_x_opt = opts.get("base_x")
+        if base_x_opt is not None:
+            # explicit start position (atrium_sim.scenarios, e.g. traverse_d needs an EXACT
+            # gap in move-steps, which random_start's uniform draw can't guarantee) - overrides
+            # random_start for this episode only.
+            self.base_x = float(np.clip(base_x_opt, 0.0, self.blueprint.length))
+        elif self.env_cfg.random_start:
+            # random module-aligned position (forces bidirectional movement)
             self.base_x = min(float(self.np_random.integers(0, traversal + 1))
                               * self.env_cfg.move_step_mm, self.blueprint.length)
         else:
@@ -274,18 +320,28 @@ class BrickLayerRobotEnv(gym.Env):
         self._arm_top_y = None
         self._fall_frac = 0.0         # drop-control: last normalized drop height (for the penalty)
         self._fell = False            # drove off the end of the rail this episode
+        self._deadlocked = False      # no action can ever make further progress (give-up path)
         self._last_place = None       # (dx, dy, dtheta, in_tol) of the last placed brick, for the
                                       # placement-feedback sensors (None until the first placement)
         self.halves_used = 0
         self.off_canvas = 0
         self.invalid = 0
+        self._attempts: dict[int, int] = {}   # tid -> consecutive failed placement attempts
+        self._abandoned: set[int] = set()     # tids given up on (see _record_place_attempt)
+        self._last_place_invalid = False      # was the LAST PLACE attempted with nothing reachable
+        self._invalid_streak = 0              # consecutive invalid-PLACE attempts, broken by any
+                                              # MOVE or any PLACE with a real target (see _obs sensors
+                                              # last_place_invalid/consecutive_invalid)
         self.last_disturbance = 0.0
         self.episode_return = 0.0
         self.last_reward = 0.0
         self._step_costs = 0.0
         self._terminal_terms = 0.0
         self._completed_courses = 0
-        if self.env_cfg.prefill_prob > 0.0 and float(self.np_random.random()) < self.env_cfg.prefill_prob:
+        prefill_tids = opts.get("prefill_tids")
+        if prefill_tids is not None:
+            self._prefill_tids(prefill_tids)
+        elif self.env_cfg.prefill_prob > 0.0 and float(self.np_random.random()) < self.env_cfg.prefill_prob:
             self._random_prefill()
         self.report = self._audit()
         self._completed_courses = self._completed_course_count()  # prefilled courses don't re-award
@@ -349,8 +405,9 @@ class BrickLayerRobotEnv(gym.Env):
             collapse = dropped >= max(cfg.collapse_min_bricks, int(np.ceil(cfg.collapse_frac * prev_matched)))
             complete = not self.report.missing_targets
             budget_out = self.steps >= self.budget
+            deadlocked = self._is_deadlocked()
 
-            if collapse or complete or budget_out:
+            if collapse or complete or budget_out or deadlocked:
                 reward += self._final_settle_delta()
                 complete = not self.report.missing_targets
                 if collapse:
@@ -362,8 +419,9 @@ class BrickLayerRobotEnv(gym.Env):
                     reward += bonus
                     self._terminal_terms += bonus
                     terminated = True
-                elif budget_out:
+                elif budget_out or deadlocked:
                     terminated = True
+            self._deadlocked = deadlocked and terminated and not (collapse or complete)
 
         self.last_reward = float(reward)
         self.episode_return += float(reward)
@@ -373,11 +431,47 @@ class BrickLayerRobotEnv(gym.Env):
 
     # --- actions --------------------------------------------------------------
 
+    def _note_failed_attempt(self, tid: int) -> bool:
+        """Increment the consecutive-failure counter for `tid`. True once
+        `max_place_attempts` is reached, telling the caller to give up on this target."""
+        self._attempts[tid] = self._attempts.get(tid, 0) + 1
+        return self._attempts[tid] >= self.env_cfg.max_place_attempts
+
+    def _clear_attempt(self, tid: int) -> None:
+        self._attempts.pop(tid, None)
+
+    def _abandon_ring(self, opening_index: int) -> float:
+        """A voussoir slot has failed to seat `max_place_attempts` times running. Voussoirs
+        must be placed in strict springings-to-keystone order (see `build_order`), so a slot
+        that can never seat means the ring can never close - structurally identical to a
+        failed strike. Reuse that exact bookkeeping (struck=True, survived=False) rather
+        than a separate flag: `_ready_arch_voussoir_candidates` already stops offering a
+        struck arch, and `_supported`'s crown gate already requires struck-and-survived, so
+        both consequences (no more voussoirs, crown-and-above permanently blocked) fall out
+        for free and stay consistent with a real collapsed ring."""
+        st = self._arch_state[opening_index]
+        st["struck"] = True
+        st["survived"] = False
+        self._terminal_terms -= self.env_cfg.arch_collapse_penalty
+        return -self.env_cfg.arch_collapse_penalty
+
     def _do_place(self, box: np.ndarray) -> float:
         target = self._next_place_target()
         if target is None:  # PLACE with nothing reachable: wasted step
             self.invalid += 1
-            return -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
+            self._last_place_invalid = True
+            self._invalid_streak += 1
+            # ramped, not flat: a lone invalid PLACE (e.g. right as the last in-reach target
+            # got matched a step ago) costs little; a policy that keeps hammering PLACE into
+            # nothing pays more each consecutive time. Belt-and-braces once PLACE is masked
+            # (see train.agent's mask_dim) - the mask is a soft constraint on a LEARNED
+            # policy's logits, not an env invariant, so an untrained/exploring/oracle-free
+            # actor can still choose it.
+            ramp = 1.0 + min(self._invalid_streak - 1, 8)
+            return -(self.env_cfg.invalid_place_frac * ramp * self.reward_cfg.r_scale
+                     / self.blueprint.n_targets)
+        self._last_place_invalid = False
+        self._invalid_streak = 0
         if target.kind == BrickKind.VOUSSOIR:
             return self._do_place_voussoir(target, box)
         prev_phi = potential(self.report, self.reward_cfg)
@@ -409,6 +503,18 @@ class BrickLayerRobotEnv(gym.Env):
         lm = next((m for m in self.report.matches if m.brick_id == bid), None)
         self._last_place = (lm.dx, lm.dy, lm.dtheta, lm.in_tol) if lm else None
         self.last_disturbance = self._disturbance(pre, bid)
+        if lm is not None:
+            self._clear_attempt(target.tid)
+        elif self._note_failed_attempt(target.tid):
+            # give up: this target has failed to seat max_place_attempts times running.
+            # A lingering stray brick (bid not None, but out of the match gate) would
+            # otherwise physically block the spawn probe at this slot forever (confirmed:
+            # 500+ wasted steps hammering one target above a since-fixed physics defect).
+            self._abandoned.add(target.tid)
+            if bid is not None:
+                self.world.remove_brick(bid)
+                self.off_canvas += 1
+                self.report = self._audit()
         reward = potential(self.report, self.reward_cfg) - prev_phi
         # penalize a high release (penalty ~ drop height ~ impact energy) so the model
         # is pushed toward realistic gentle placement instead of slamming from the top
@@ -499,14 +605,20 @@ class BrickLayerRobotEnv(gym.Env):
             wedge_verts=target.wedge_verts, mass_kg=mass,
         )
         if bid is None:
+            # nothing spawned, so the world (and self.report) is unchanged - no re-audit needed
             self.off_canvas += 1
-            return -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
+            reward = -self.env_cfg.invalid_place_frac * self.reward_cfg.r_scale / self.blueprint.n_targets
+            if self._note_failed_attempt(target.tid):
+                reward += self._abandon_ring(target.arch_id)
+            return reward
         removed = self._settle(self.env_cfg.max_settle_substeps)
         self.off_canvas += len(removed)
         self.last_disturbance = self._disturbance(pre, bid)
 
         prev_closure = self._arch_closure_frac()
-        if bid not in removed:
+        seated = bid not in removed
+        if seated:
+            self._clear_attempt(target.tid)
             st["matched"].add(target.tid)
             st["brick_ids"][target.tid] = bid
             poses = {p.brick_id: p for p in self.world.poses()}
@@ -520,9 +632,23 @@ class BrickLayerRobotEnv(gym.Env):
         new_closure = self._arch_closure_frac()
         reward = self.env_cfg.arch_ring_closure_frac * self.reward_cfg.r_scale * (new_closure - prev_closure)
 
+        # give-up: the wedge was ejected during settle (knocked/toppled off-canvas) rather
+        # than seating - nothing lingers to remove (physics already cleared it), but the
+        # SAME slot would otherwise be re-offered forever (voussoirs are strict build-order,
+        # so nothing after this slot can ever place either). Ring-failure bookkeeping is the
+        # correct model: it genuinely can never close now.
+        if not seated and self._note_failed_attempt(target.tid):
+            reward += self._abandon_ring(target.arch_id)
+
         vt = self._arch_targets[target.arch_id]
         if len(st["matched"]) >= len(vt) and not st["struck"]:
             reward += self._strike_arch(target.arch_id)
+        # keep self.report fresh (mirrors the flat-brick path in _do_place): before this,
+        # a whole ring's worth of exempted/stray bookkeeping only surfaced on the NEXT
+        # flat placement's potential delta - a single spurious reward spike well after the
+        # arch was actually built, and stale frac_filled/stray_frac/course_fill sensors
+        # for the whole ring-building span.
+        self.report = self._audit()
         return reward
 
     def _strike_arch(self, opening_index: int) -> float:
@@ -573,6 +699,7 @@ class BrickLayerRobotEnv(gym.Env):
         self.base_x = float(np.clip(self.base_x + step, 0.0, self.blueprint.length))
         self.moves += 1
         self._moves_since_place += 1
+        self._invalid_streak = 0  # a MOVE breaks a run of consecutive invalid PLACEs
         # audit unchanged by a move, but keep report fresh for obs consistency
         scale = self.reward_cfg.r_scale / self.blueprint.n_targets
         cost = self.env_cfg.move_cost_frac * scale
@@ -591,14 +718,25 @@ class BrickLayerRobotEnv(gym.Env):
         """Pre-place a random FLAT-TOPPED partial structure at exact targets, so the robot has
         to COMPLETE an already-standing, LEVEL wall. Because targets are ordered (course, slot),
         the first `count` of them are whole bottom courses plus a left-to-right prefix of the
-        current course - i.e. exactly the level build order, and always physically stable.
-        Spawned directly (not via _do_place) so it doesn't count as an agent placement."""
+        current course - i.e. exactly the level build order, and always physically stable."""
         n = self.blueprint.n_targets
         cap = max(1, min(int(self.env_cfg.prefill_max_frac * n), n - 1))
         count = int(self.np_random.integers(1, cap + 1))   # 1..cap -> 0 < placed < n
-        placed = {t.tid for t in self.blueprint.targets[:count]}
+        self._prefill_tids(t.tid for t in self.blueprint.targets[:count])
+
+    def _prefill_tids(self, tids) -> None:
+        """Pre-place an EXPLICIT target set (by tid) at its exact position - the general form
+        of _random_prefill's contiguous prefix, used by atrium_sim.scenarios to isolate a
+        specific skill (e.g. "everything is done except one far cluster - walk there and
+        finish it"). Support-safe for ANY subset as long as every FULL course below the
+        highest targeted one is included too: the level gate only requires the course BELOW
+        to be complete, not any left-to-right order within a course, so a course can be
+        prefilled with a gap in the middle and every brick in it still rests on the (fully
+        prefilled) course below, not on its neighbours. Spawned directly (not via _do_place),
+        so it doesn't count as an agent placement."""
+        tids = set(tids)
         for t in self.blueprint.targets:
-            if t.tid in placed:
+            if t.tid in tids:
                 self.world.spawn_brick(t.x, t.kind, t.course, theta=t.theta, rest_y=t.y)
         self._settle(self.env_cfg.final_settle_substeps)
 
@@ -665,7 +803,21 @@ class BrickLayerRobotEnv(gym.Env):
 
     def _placeable(self, matched: set[int]) -> list[BrickTarget]:
         return [t for t in self.blueprint.targets
-                if t.tid not in matched and self._supported(t, matched)]
+                if t.tid not in matched and t.tid not in self._abandoned
+                and self._supported(t, matched)]
+
+    def _is_deadlocked(self) -> bool:
+        """True if no action can EVER make further progress: work remains, but no flat
+        target currently passes the level/arch gate and no voussoir ring is ready either -
+        every path to the rest of the wall is permanently blocked (an abandoned target, or
+        a ring that failed and can never close/strike - see _abandon_ring). Distinct from
+        budget_out: without this, the only way such a state ends is burning the ENTIRE
+        remaining step budget on MOVEs/masked-cost PLACEs that can never help (confirmed:
+        exactly this pattern, hundreds of wasted steps, before the give-up path existed)."""
+        if not self.report.missing_targets:
+            return False
+        return (not self._placeable(self._matched_ids())
+                and not self._ready_arch_voussoir_candidates())
 
     def _reachable_open(self) -> list[BrickTarget]:
         matched = self._matched_ids()
@@ -694,7 +846,8 @@ class BrickLayerRobotEnv(gym.Env):
         matched = self._matched_ids()
         opens = list(self._placeable(matched)) + self._ready_arch_voussoir_candidates()
         if not opens:
-            opens = [t for t in self.blueprint.targets if t.tid not in matched]
+            opens = [t for t in self.blueprint.targets
+                     if t.tid not in matched and t.tid not in self._abandoned]
         return min(opens, key=lambda t: abs(t.x - self.base_x)) if opens else None
 
     def _completed_course_count(self) -> int:
@@ -706,15 +859,24 @@ class BrickLayerRobotEnv(gym.Env):
         )
 
     def _reach_potential(self) -> float:
-        """Phi_reach(s) = -c_reach * dist(base, nearest unplaced target) / L.
+        """Phi_reach(s) = -c_reach * min(dist(base, nearest unplaced target), cap) / cap,
+        cap = _REACH_SHAPING_CAP_MM.
 
         Moving toward work raises it (positive shaping reward); zero once the wall
         is complete. Potential-based, so it doesn't change the optimal policy -
-        it only supplies the directional movement gradient PPO was missing."""
+        it only supplies the directional movement gradient PPO was missing.
+
+        Normalized by a fixed CAP, not wall length L: dividing by L made a single move worth
+        c_reach*move_step_mm/L, which SHRINKS as walls grow (confirmed: 0.33 on a 6x4 training
+        wall vs 0.125 on a 3520mm facade at c_reach=2.0) - the identical size-dependence bug
+        fixed on the observation side (see _obs's next_dx/nearest_dx). A fixed cap makes a
+        move worth the same regardless of wall size; the min(...) saturates the potential for
+        targets farther than the cap so it stays bounded (telescopes to a finite total)."""
         t = self._nearest_open()
         if t is None:
             return 0.0
-        return -self.env_cfg.c_reach * abs(t.x - self.base_x) / self.blueprint.length
+        dist = min(abs(t.x - self.base_x), _REACH_SHAPING_CAP_MM)
+        return -self.env_cfg.c_reach * dist / _REACH_SHAPING_CAP_MM
 
     def _min_moves(self) -> int:
         span = self.blueprint.length
@@ -723,8 +885,15 @@ class BrickLayerRobotEnv(gym.Env):
     # --- internals ------------------------------------------------------------
 
     def _audit(self) -> AuditReport:
+        # exempt seated voussoirs from the stray/waste count: they live outside
+        # self.blueprint (a separate, non-course-aligned pool - see reset()) so
+        # match_bricks can never match one to anything by construction.
+        exempt = frozenset(
+            bid for st in self._arch_state.values() for bid in st["brick_ids"].values()
+        )
         return audit(self.world.poses(), self.blueprint, self.reward_cfg,
-                     off_canvas=self.off_canvas, halves_used=self.halves_used)
+                     off_canvas=self.off_canvas, halves_used=self.halves_used,
+                     exempt_brick_ids=exempt)
 
     def _settle(self, substeps: int) -> list[int]:
         cbs = []
@@ -753,9 +922,20 @@ class BrickLayerRobotEnv(gym.Env):
     def _obs(self) -> np.ndarray:
         """A compact SENSOR vector (OBS_DIM scalars) - the env's reaction, not the grid.
         Everything is normalized relative to the CURRENT wall, so the shape and meaning are
-        identical for a 4x3 wall or a 40-course pier (size-agnostic)."""
+        identical for a 4x3 wall or a 40-course pier (size-agnostic).
+
+        Distance-to-work (next_dx / nearest_dx) is normalized by REACH, not wall length - a
+        555mm gap must read the same on a 6x4 training wall as on a 3520mm facade. Length-
+        normalizing it was the confirmed root cause of the "stops in place" failure: the
+        learned MOVE/PLACE threshold sits at a fixed fraction of whatever obs[8] reads, so on
+        any wall past ~2200mm a real, out-of-reach gap could still read BELOW that threshold
+        and get misread as "close enough to place." reach_mm/length (obs[3]) was meant to be
+        the scale cue that fixes this, but it was measurably the LEAST influential of all 22
+        inputs (a policy can't learn to rescale a threshold with a rank-22 feature) - reach-
+        normalizing the distance itself removes the need for that rescaling entirely."""
         bp = self.blueprint
         length = max(1.0, bp.length)
+        reach = self.env_cfg.reach_mm
         r = self.report
         matched_ids = {m.target_id for m in r.matches}
         reachable = self._reachable_open()
@@ -769,23 +949,43 @@ class BrickLayerRobotEnv(gym.Env):
         course = bp.course_targets(cursor)
         course_fill = sum(1 for t in course if t.tid in matched_ids) / max(1, len(course))
 
-        if next_t is not None:
-            next_dx = np.clip((next_t.x - self.base_x) / self.env_cfg.reach_mm, -1.0, 1.0)
-            next_course = next_t.course / max(1, bp.n_courses)
-            next_half = 1.0 if next_t.kind == BrickKind.HALF else 0.0
-            next_voussoir = 1.0 if next_t.kind == BrickKind.VOUSSOIR else 0.0
+        # `next_*` describe the boustrophedon-next in-reach target; when nothing is in reach
+        # (next_t is None), fall back to `nearest` instead of hard-zeroing - the old all-zero
+        # vector was indistinguishable from "the target is exactly at the arm" and pinned 4 of
+        # 22 fields dead exactly in the state where the agent most needs directional signal.
+        fallback = next_t if next_t is not None else nearest
+        if fallback is not None:
+            next_dx = np.clip((fallback.x - self.base_x) / reach, -1.0, 1.0)
+            next_course = fallback.course / max(1, bp.n_courses)
+            next_half = 1.0 if fallback.kind == BrickKind.HALF else 0.0
+            next_voussoir = 1.0 if fallback.kind == BrickKind.VOUSSOIR else 0.0
         else:
             next_dx = next_course = next_half = next_voussoir = 0.0
-        nearest_dx = np.clip((nearest.x - self.base_x) / length, -1.0, 1.0) if nearest else 0.0
+        nearest_dx = np.clip((nearest.x - self.base_x) / reach, -1.0, 1.0) if nearest else 0.0
+        # magnitude beyond the sign-only saturation above: how many MOVE_STEP_MMs of walking
+        # remain once the target clears reach, in action units (so it means the same thing on
+        # every wall). Pairs with next_dx/nearest_dx's sign to fully describe a far target -
+        # those alone can't tell "just past reach" from "clear across the wall".
+        gap_mm = abs(nearest.x - self.base_x) if nearest is not None else 0.0
+        moves_to_target = min(max(0.0, gap_mm - reach) / self.env_cfg.move_step_mm / 24.0, 1.0)
         lp = self._last_place  # (dx, dy, dtheta, in_tol) or None
         arch_closure = self._arch_closure_frac()
+        at_left = self.base_x <= 1.0
+        at_right = self.base_x >= length - 1.0
+        # mask_*: which of the 3 modes is a genuine no-op right now, for train.agent's logit
+        # mask (see HybridAgent.mask_dim) - PLACE with nothing reachable, or a MOVE that would
+        # merely clamp to the same position. A MOVE toward an edge is a real, consequential
+        # action (not masked) when fall_off_edge is on - it topples the gantry, it doesn't no-op.
+        mask_place = 1.0 if next_t is not None else 0.0
+        mask_left = 0.0 if (at_left and not self.env_cfg.fall_off_edge) else 1.0
+        mask_right = 0.0 if (at_right and not self.env_cfg.fall_off_edge) else 1.0
 
         sensors = np.array([
             # --- rail position ---
             self.base_x / length,                                   # where along the rail
-            1.0 if self.base_x <= 1.0 else 0.0,                     # at the left end
-            1.0 if self.base_x >= length - 1.0 else 0.0,            # at the right end
-            min(self.env_cfg.reach_mm / length, 1.0),              # reach vs wall width
+            1.0 if at_left else 0.0,                                # at the left end
+            1.0 if at_right else 0.0,                               # at the right end
+            min(reach / length, 1.0),                               # reach vs wall width
             # --- work sensing ---
             1.0 if reachable else 0.0,                              # is there a target in reach
             next_dx,                                                # next target x, relative to arm
@@ -809,6 +1009,11 @@ class BrickLayerRobotEnv(gym.Env):
             # identical to before this feature) ---
             next_voussoir,                                          # next target is a voussoir
             arch_closure,                                           # ring-closure across all arches
+            # --- far-field + error signal + action mask (added: the stall-fix pass) ---
+            moves_to_target,                                        # walking distance left, once out of reach
+            1.0 if self._last_place_invalid else 0.0,               # the last PLACE attempt was invalid
+            min(self._invalid_streak / 8.0, 1.0),                  # consecutive invalid PLACEs
+            mask_place, mask_left, mask_right,                      # which modes are genuine no-ops now
         ], dtype=np.float32)
         return np.clip(sensors, -1.0, 1.0)
 
@@ -833,6 +1038,7 @@ class BrickLayerRobotEnv(gym.Env):
                 "placements": float(self.placements), "moves": float(self.moves),
                 "invalid": float(self.invalid), "steps": float(self.steps),
                 "fell": float(self._fell),
+                "deadlocked": float(self._deadlocked),
                 "n_arches": float(n_arches),
                 "ring_closure": self._arch_closure_frac(),
                 "arch_strike_survival": (survived_n / len(struck)) if struck else 1.0,
@@ -858,7 +1064,9 @@ class BrickLayerRobotEnv(gym.Env):
                 "placed": self.placements, "in tol": f"{self.report.frac_in_tol:.0%}",
                 "reward": f"{self.last_reward:+.3f}", "return": f"{self.episode_return:+.2f}",
             },
-            cursor=0,
+            cursor=self._active_course(),  # was hardcoded 0: the renderer's next-slot
+            # highlight always evaluated against course 0, never the robot's real active
+            # course, on every robot GIF ever rendered.
             robot=(self.base_x, self.env_cfg.reach_mm,
                    COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm),
             hard_bodies=self.world.hard_poses(),

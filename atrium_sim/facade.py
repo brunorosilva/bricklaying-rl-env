@@ -31,7 +31,7 @@ from atrium_sim.blueprint import (
     brick_face,
     generate_blueprint,
 )
-from atrium_sim.constants import COURSE_MM, MODULE_MM
+from atrium_sim.constants import COURSE_MM, MODULE_MM, SHAPE_RADIUS
 
 ARCH_STYLES = ("flat", "lintel_soldier", "semicircular", "segmental", "jack")
 STRUCTURAL_ARCH_STYLES = ("semicircular", "segmental", "jack")
@@ -159,16 +159,35 @@ class ArchRegion:
         pier targets away up to those exact whole-module edges (the ring oversails onto the
         pier near the springing, then that raw bound is rounded OUT to whole columns), so the
         crown-course brick directly above can land anywhere within them, not just within the
-        bare span or the ring's own unrounded footprint."""
+        bare span or the ring's own unrounded footprint. `PACKING_CLEARANCE_MM` is a
+        HORIZONTAL inset only (same as `spandrel_hard_bodies`) - it exists so this body's
+        side walls don't sit exactly flush with the pier bricks spawning just outside
+        void_x0/void_x1. The TOP face must land exactly on the crown course's bottom edge
+        (no clearance): the crown brick's target rest_y is course-derived (`COURSE_MM *
+        crown_course + h/2`), so its bottom face is exactly `COURSE_MM * crown_course` - a
+        vertical inset here would leave that exact gap beneath every crown-course brick,
+        which the spawn probe then "fixes" by lifting the brick into a tilt bad enough to
+        blow the match-angle gate (confirmed: -6mm on the semicircular/segmental packing
+        was capping the whole crown course out of tolerance).
+
+        `+ SHAPE_RADIUS`: the raw wedge verts below are the ring's GEOMETRIC extrados, but
+        `physics.spawn_brick` gives voussoirs a rounded (Minkowski) collision hull - the
+        ring's TRUE physical top surface sits `SHAPE_RADIUS` higher than this geometry, or a
+        brick spawned to rest exactly on the geometric line finds a sliver of overlap there
+        and the spawn probe "fixes" it with a full SPAWN_PROBE_STEP_MM jump instead (confirmed:
+        an exact 0.0mm geometric mismatch still produced an 18-28mm lift). Compensating here,
+        not by dropping the collision radius on the wedge shape itself, matters: that radius
+        is also what keeps voussoir-to-voussoir ring joints numerically stable under the
+        strike (confirmed: removing it collapses an otherwise-identical ring, 22.6mm drift)."""
         wedges = arch_wedges(self.spec)
-        ring_top_y = max(
+        ring_top_y = SHAPE_RADIUS + max(
             self.spring_y + w.y + (lx * math.sin(w.theta) + ly * math.cos(w.theta))
             for w in wedges for lx, ly in w.verts
         )
-        crown_y = COURSE_MM * self.crown_course - PACKING_CLEARANCE_MM
+        crown_y = COURSE_MM * self.crown_course
         if ring_top_y >= crown_y - 1.0:
             return None
-        x0, x1 = self.void_x0, self.void_x1
+        x0, x1 = self.void_x0 + PACKING_CLEARANCE_MM, self.void_x1 - PACKING_CLEARANCE_MM
         return HardBody("cement", ((x0, ring_top_y), (x1, ring_top_y), (x1, crown_y), (x0, crown_y)),
                         trigger_course=max(0, self.crown_course - 1))
 
@@ -224,7 +243,12 @@ ARCH_PLAN_SPECS: tuple[tuple[str, int, int, int, int, int, int, int], ...] = (
     # need much more vertical room (rise scales with span) and only fit - hence only appear -
     # from mid/high rungs onward, a natural difficulty ramp gated by sample_arch_plan's own
     # grid-size filter against SIZE_LADDER, not a separately-tracked difficulty score.
-    ("jack", 1, 0, 1, 2, 2, 3, 3),
+    # was ("jack", 1, 0, 1, 2, 2, 3, 3): col=1,row=0 voids the ENTIRE 3-column grid's rows
+    # 0-1 (the ring's oversail rounds the tiling void out to the whole width), leaving only
+    # 3 flat targets total below/around the ring - "hand-validated solvable" in name only.
+    # row=1 leaves a real course below the opening; 4x3 keeps it the smallest NON-degenerate
+    # jack in the ladder (10 flat targets, oracle: filled=1.0, ring_closure=1.0).
+    ("jack", 1, 1, 1, 1, 1, 4, 3),
     ("jack", 2, 0, 1, 2, 2, 5, 3),
     ("jack", 2, 1, 1, 3, 3, 5, 5),
     ("jack", 1, 0, 2, 3, 3, 4, 4),
