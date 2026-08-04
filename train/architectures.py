@@ -1,14 +1,23 @@
 """A registry of policy/value backbones for the architecture bake-off.
 
-Every backbone maps the flat 538-d observation to a feature vector; `Agent`
-(train/agent.py) puts a linear Gaussian-mean head and a linear value head on
-top. The spatial backbones (CNN, attention) split the observation back into its
-(course x slot x feature) grid + the global scalars - the structure the flat
-MLP has to rediscover.
+Every backbone maps a flat observation to a feature vector; `Agent`/`HybridAgent`
+(train/agent.py) put a Gaussian-mean head and a value head on top. Two unrelated
+tasks share this registry, and "cnn"/"attention"/"attention2" mean something
+different for each - dispatched in build_backbone() by obs_dim, since there's no
+other signal available at construction time:
 
-The observation layout (see atrium_sim/observations.py):
-  obs[:528]  -> slot tensor  (C_MAX=6, S_MAX=11, N_SLOT_FEATURES=8)
-  obs[528:]  -> 10 global scalars
+- The base bricklayer task (538-d, see atrium_sim/observations.py): obs[:528] is a
+  real (course x slot x feature) grid (C_MAX=6, S_MAX=11, N_SLOT_FEATURES=8) + 10
+  global scalars. CNN/SlotAttention split it back into that grid - the spatial
+  structure a flat MLP would otherwise have to rediscover.
+- The mobile-robot task (28-d, see atrium_sim.envs.robot_env._obs): a flat SENSOR
+  vector (rail position, nearest-target direction, placement feedback, action
+  mask, ...) with no grid at all - that grid was deliberately dropped (a prior
+  refactor moved this task off the blueprint-grid observation entirely). FlatCNN/
+  FlatAttention instead treat the 28 scalars as a plain sequence (1D conv) or as
+  individual tokens via per-feature learned tokenization (see _FeatureTokenizer -
+  the numeric-feature-tokenization scheme from FT-Transformer), since there's no
+  spatial layout to exploit, only adjacency-in-the-vector and feature identity.
 """
 
 from __future__ import annotations
@@ -150,6 +159,68 @@ class SlotAttention(nn.Module):
         return self.fc(torch.cat([h, glob], dim=1))
 
 
+class _FeatureTokenizer(nn.Module):
+    """Each flat obs scalar becomes its own token via a per-feature learned affine map:
+    token_i = x_i * w_i + b_i (numeric feature tokenization, see FT-Transformer). Lets a
+    transformer self-attend across raw sensor scalars that have no spatial grid between
+    them, only a fixed identity (index i is always "nearest_dx", index 20 is always
+    "next_voussoir", etc) - w_i/b_i give each feature its own learned embedding direction."""
+
+    def __init__(self, n: int, d_model: int):
+        super().__init__()
+        self.w = nn.Parameter(torch.randn(n, d_model) * 0.02)
+        self.b = nn.Parameter(torch.zeros(n, d_model))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.unsqueeze(-1) * self.w + self.b  # (B, n, d_model)
+
+
+class FlatAttention(nn.Module):
+    """SlotAttention's analogue for a flat sensor observation with no (course x slot)
+    grid to split - tokenizes each scalar (_FeatureTokenizer), self-attends, mean-pools."""
+
+    def __init__(self, obs_dim: int, d_model=64, nhead=4, layers=1, hidden=128):
+        super().__init__()
+        self.tokenize = _FeatureTokenizer(obs_dim, d_model)
+        enc = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward=128, batch_first=True, activation="gelu"
+        )
+        self.tr = nn.TransformerEncoder(enc, layers)
+        self.fc = nn.Sequential(layer_init(nn.Linear(d_model, hidden)), nn.Tanh())
+        self.feat_dim = hidden
+
+    def forward(self, x):
+        h = self.tr(self.tokenize(x)).mean(dim=1)
+        return self.fc(h)
+
+
+class FlatCNN(nn.Module):
+    """CNN's analogue for a flat sensor observation with no (course x slot) grid - 1D
+    convs read local neighborhoods among ADJACENT obs indices instead (robot_env._obs
+    groups related sensors together - rail position, then work-sensing, then placement
+    feedback, ... - so nearby indices are usually semantically related, just not spatial
+    in the image sense), then a dense head."""
+
+    def __init__(self, obs_dim: int, hidden=128, channels=32):
+        super().__init__()
+        self.conv = nn.Sequential(
+            layer_init(nn.Conv1d(1, channels, 3, padding=1)), nn.Tanh(),
+            layer_init(nn.Conv1d(channels, channels, 3, padding=1)), nn.Tanh(),
+        )
+        self.head = nn.Sequential(
+            layer_init(nn.Linear(channels * obs_dim, 256)), nn.Tanh(),
+            layer_init(nn.Linear(256, hidden)), nn.Tanh(),
+        )
+        self.feat_dim = hidden
+
+    def forward(self, x):
+        c = self.conv(x.unsqueeze(1))  # (B, 1, obs_dim) -> (B, channels, obs_dim)
+        return self.head(c.reshape(c.shape[0], -1))
+
+
+BASE_TASK_OBS_DIM = SLOT_DIM + N_GLOB  # 538 - the only obs_dim with a real slot grid
+
+
 def build_backbone(name: str, obs_dim: int) -> nn.Module:
     if name == "mlp":
         return MLP(obs_dim, 128, 2)
@@ -165,13 +236,21 @@ def build_backbone(name: str, obs_dim: int) -> nn.Module:
         return MLP(obs_dim, 128, 2, layernorm=True)
     if name == "resmlp":
         return ResMLP(obs_dim, 128, 2)
-    # spatial backbones need the actual global-feature count (base env = 10,
-    # robot env = 16); _SlotSplit already slices the slot grid off the front
-    n_glob = obs_dim - SLOT_DIM
-    if name == "cnn":
-        return CNN(n_glob, hidden=128)
-    if name == "attention":
-        return SlotAttention(n_glob, 64, 4, 1, 128)
-    if name == "attention2":
-        return SlotAttention(n_glob, 64, 4, 2, 128)
+    if obs_dim == BASE_TASK_OBS_DIM:
+        # real (course x slot) grid + globals; _SlotSplit slices the grid off the front
+        n_glob = obs_dim - SLOT_DIM
+        if name == "cnn":
+            return CNN(n_glob, hidden=128)
+        if name == "attention":
+            return SlotAttention(n_glob, 64, 4, 1, 128)
+        if name == "attention2":
+            return SlotAttention(n_glob, 64, 4, 2, 128)
+    else:
+        # flat sensor vector (the robot task), no grid - see FlatCNN/FlatAttention
+        if name == "cnn":
+            return FlatCNN(obs_dim, hidden=128)
+        if name == "attention":
+            return FlatAttention(obs_dim, 64, 4, 1, 128)
+        if name == "attention2":
+            return FlatAttention(obs_dim, 64, 4, 2, 128)
     raise ValueError(f"unknown architecture: {name!r} (choices: {ARCHITECTURES})")

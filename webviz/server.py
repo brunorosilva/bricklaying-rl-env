@@ -37,6 +37,25 @@ PLANS_DIR = Path("plans")
 HOUSE_PREFIX = "house:"
 
 
+def _robot_search_roots() -> list[Path]:
+    """runs/robot (the curated/shipped location) plus any architecture-bake-off directory
+    (train.sweep's --run-dir, e.g. runs/sweep_archbakeoff*) - so a sweep run's checkpoints
+    are inspectable in the frontend without first being promoted into runs/robot. Safe to
+    widen: list_robot_checkpoints' obs_dim compat check still filters out anything that
+    isn't a current-env robot checkpoint (old grid-obs sweeps, base-task sweeps, ...)."""
+    roots = [ROBOT_RUNS_DIR]
+    roots += sorted(p for p in Path("runs").glob("*sweep*") if p.is_dir() and p != ROBOT_RUNS_DIR)
+    return roots
+
+
+def _find_robot_run_dir(name: str) -> Path:
+    for root in _robot_search_roots():
+        d = root / name
+        if (d / "ckpt.pt").exists():
+            return d
+    raise FileNotFoundError(f"no robot checkpoint run {name!r} under {_robot_search_roots()}")
+
+
 def list_checkpoints() -> list[str]:
     if not RUNS_DIR.exists():
         return []
@@ -56,13 +75,13 @@ def list_robot_checkpoints() -> list[str]:
     call (confirmed: this endpoint is hit on every frontend page load) was the dominant
     latency cost of opening the page - a stat() per file is orders of magnitude cheaper,
     and a checkpoint overwritten mid-training (mtime changes) still gets re-checked."""
-    if not ROBOT_RUNS_DIR.exists():
-        return []
     import torch
 
     from atrium_sim.envs.robot_env import OBS_DIM
     out = []
-    for p in sorted(ROBOT_RUNS_DIR.glob("*/ckpt.pt")):
+    paths = [p for root in _robot_search_roots() if root.exists()
+             for p in root.glob("*/ckpt.pt")]
+    for p in sorted(paths, key=lambda p: p.parent.name):
         key = str(p)
         mtime = p.stat().st_mtime
         cached = _robot_ckpt_compat_cache.get(key)
@@ -114,7 +133,7 @@ def build_robot_policy(name: str, env):
     if name.startswith("ckpt:"):
         from train.agent import HybridAgentPolicy, load_hybrid_agent
 
-        return HybridAgentPolicy(load_hybrid_agent(str(ROBOT_RUNS_DIR / name[5:] / "ckpt.pt")))
+        return HybridAgentPolicy(load_hybrid_agent(str(_find_robot_run_dir(name[5:]) / "ckpt.pt")))
     if name == "oracle":
         from baselines.robot_oracle import RobotOraclePolicy
 
@@ -144,7 +163,7 @@ def _robot_ckpt_overrides(policy_name: str) -> tuple[dict, dict]:
     try:
         import torch
 
-        ck = torch.load(str(ROBOT_RUNS_DIR / policy_name[5:] / "ckpt.pt"),
+        ck = torch.load(str(_find_robot_run_dir(policy_name[5:]) / "ckpt.pt"),
                         weights_only=True, map_location="cpu")
         a = ck.get("args", {})
         env_overrides = {

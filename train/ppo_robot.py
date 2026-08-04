@@ -225,7 +225,9 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
                         random_start: bool) -> dict:
     """Same shape as evaluate_robot, but on held-out ARCH-BEARING facades - tracks whether the
     arch mechanic itself (ring closure, strike survival) is being learned, not just flat-wall
-    fill/precision."""
+    fill/precision. Also breaks strike survival down BY STYLE (jack/semicircular/segmental):
+    the aggregate hid that jack - zero rise, no arch action, least forgiving of placement error
+    - was the one style still collapsing after the strike while the other two had converged."""
     from atrium_sim.facade import FacadePlan, Opening
 
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
@@ -236,6 +238,7 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
     policy = HybridAgentPolicy(agent)
     keys = ("frac_filled", "frac_in_tol", "ring_closure", "arch_strike_survival")
     acc = {k: [] for k in keys}
+    by_style: dict[str, list[float]] = {}
     for i in range(episodes):
         style, col, row, n_cols, n_rows, ring, gc, gr = _ARCH_EVAL_SPECS[i % len(_ARCH_EVAL_SPECS)]
         o = Opening("window", col=col, row=row, n_cols=n_cols, n_rows=n_rows,
@@ -248,8 +251,51 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
             done = term or trunc
         for k in keys:
             acc[k].append(info["metrics"][k])
+        by_style.setdefault(style, []).append(info["metrics"]["arch_strike_survival"])
     env.close()
-    return {k: float(np.mean(v)) for k, v in acc.items()}
+    out = {k: float(np.mean(v)) for k, v in acc.items()}
+    for style, vals in by_style.items():
+        out[f"{style}_survival"] = float(np.mean(vals))
+    return out
+
+
+def evaluate_robot_house(agent: HybridAgent, episodes: int, sigma_mm: float, sigma_deg: float,
+                         random_start: bool, plan_path: str = "plans/uk_terrace.json") -> dict:
+    """Held out on the ACTUAL named facade (not synthetic arch specs, not trained on at all -
+    plans/*.json are gallery/eval fixtures only). uk_terrace has exactly one of each real
+    structural style (semicircular, segmental, jack), so per-region survival doubles as
+    per-style survival with no ambiguity - this is the direct measure of whether an
+    architecture closes the specific jack-arch (rightmost, springing at col 11 of 16)
+    strike-survival gap diagnosed on this checkpoint."""
+    from atrium_sim.facade import FacadePlan
+
+    plan = FacadePlan.from_json(Path(plan_path).read_text())
+    env = gym.make("atrium_sim/BrickLayerRobot-v0")
+    u = env.unwrapped
+    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
+                                      collapse_penalty=0.5, c_waste=0.25)  # match training
+    policy = HybridAgentPolicy(agent)
+    keys = ("frac_filled", "frac_in_tol", "ring_closure", "arch_strike_survival")
+    acc = {k: [] for k in keys}
+    by_style: dict[str, list[float]] = {}
+    for i in range(episodes):
+        obs, _ = env.reset(seed=40000 + i, options={"plan": plan})
+        done = False
+        while not done:
+            obs, r, term, trunc, info = env.step(policy.act(obs))
+            done = term or trunc
+        for k in keys:
+            acc[k].append(info["metrics"][k])
+        for region in u._arch_regions:
+            st = u._arch_state[region.opening_index]
+            if st["struck"]:
+                by_style.setdefault(region.spec.kind, []).append(1.0 if st["survived"] else 0.0)
+    env.close()
+    out = {k: float(np.mean(v)) for k, v in acc.items()}
+    for style, vals in by_style.items():
+        out[f"{style}_survival"] = float(np.mean(vals))
+    return out
 
 
 def evaluate_robot_scenarios(agent: HybridAgent, sigma_mm: float, sigma_deg: float,
@@ -487,6 +533,15 @@ def main(args: Args) -> dict:
                                                                args.sigma_deg, args.random_start)
                 for k, v in last_eval_scenarios.items():
                     writer.add_scalar(f"eval_scenarios/{k}", v, global_step)
+            last_eval_house = None
+            if args.arch_prob_max > 0.0:
+                # cheap (5 episodes) - the direct held-out measure on the real facade that
+                # diagnosed this checkpoint's failure, never trained on (plans/*.json are
+                # gallery/eval fixtures only)
+                last_eval_house = evaluate_robot_house(agent, 5, args.sigma_mm,
+                                                       args.sigma_deg, args.random_start)
+                for k, v in last_eval_house.items():
+                    writer.add_scalar(f"eval_house/{k}", v, global_step)
             if curriculum is not None:
                 # measure competence at the CURRENT frontier and advance a rung when it's
                 # mastered (the fixed eval_suite above stays the held-out generalization metric)
@@ -534,11 +589,16 @@ def main(args: Args) -> dict:
             scenario_msg = ""
             if last_eval_scenarios is not None:
                 scenario_msg = f"  scenarios {last_eval_scenarios['mean']:.2%}"
+            house_msg = ""
+            if last_eval_house is not None:
+                house_msg = (f"  house survive {last_eval_house['arch_strike_survival']:.2%} "
+                            f"jack {last_eval_house.get('jack_survival', float('nan')):.2%}")
             print(f"update {update}/{num_updates}  step {global_step}  SPS {sps}  "
                   f"eval in-tol {last_eval.get('frac_in_tol', 0):.2%}  "
                   f"filled {last_eval.get('frac_filled', 0):.2%}  "
                   f"completed {last_eval.get('completed', 0):.2%}  "
-                  f"return {last_eval.get('episode_return', 0):+.2f}" + arch_msg + scenario_msg,
+                  f"return {last_eval.get('episode_return', 0):+.2f}"
+                  + arch_msg + scenario_msg + house_msg,
                   flush=True)
 
     save_hybrid_checkpoint(agent, str(run_path / "ckpt.pt"), extra={"args": vars(args)})

@@ -29,6 +29,11 @@ from train.architectures import ARCHITECTURES
 # the GPU would only add host<->device transfer overhead — keep them on CPU.
 GPU_ARCHS = {"cnn", "attention", "attention2"}
 
+# no longer any robot-incompatible archs: train.architectures.build_backbone now
+# dispatches cnn/attention/attention2 to flat-obs variants (FlatCNN/FlatAttention) for
+# any obs_dim other than the base task's 538, so they build for the robot task too.
+ROBOT_INCOMPATIBLE_ARCHS: set[str] = set()
+
 
 def launch(arch: str, a: argparse.Namespace) -> subprocess.Popen:
     # transformers are matmul-bound (not env-bound like the MLPs), so give them
@@ -57,11 +62,19 @@ def launch(arch: str, a: argparse.Namespace) -> subprocess.Popen:
     if not a.robot:  # ppo_robot has no absolute/slot action mode
         cmd += ["--action-mode", a.action_mode]
     else:
-        cmd += ["--device", device]
+        cmd += ["--device", device, "--eval-suite", a.eval_suite]
         if a.random_start:  # train the robot9 bidirectional task (base starts anywhere)
             cmd += ["--random-start"]
         if a.drop_control:  # train the robot11 drop-height task (box[1] = release height)
             cmd += ["--drop-control"]
+        if a.async_envs:  # AsyncVectorEnv - one subprocess per env, needed to saturate cores
+            cmd += ["--async-envs"]
+        if a.curriculum:  # competence-gated SIZE curriculum (blueprint.SIZE_LADDER); also
+            cmd += ["--curriculum", "--curriculum-cap", str(a.curriculum_cap)]  # gates arch_prob below
+        if a.arch_prob_max > 0.0:  # structural arches (needs --curriculum, see ppo_robot.Args)
+            cmd += ["--arch-prob-max", str(a.arch_prob_max)]
+        if a.scenario_mix > 0.0:  # oracle-gated scenario library mixed into resets
+            cmd += ["--scenario-mix", str(a.scenario_mix)]
     env = os.environ.copy()
     env["OMP_NUM_THREADS"] = str(threads)
     env["MKL_NUM_THREADS"] = str(threads)
@@ -89,6 +102,11 @@ def run_pool(archs: list[str], a: argparse.Namespace) -> None:
 def summarize(archs: list[str], run_dir: str, robot: bool = False) -> dict:
     from tbparse import SummaryReader
 
+    # tags that only exist when the run trained arches/scenarios (arch_prob_max/scenario_mix
+    # > 0) - see train.ppo_robot's eval block. Missing gracefully -> None, not a KeyError.
+    ARCH_TAGS = ("arch_strike_survival", "ring_closure", "jack_survival",
+                 "semicircular_survival", "segmental_survival")
+
     rows = []
     for arch in archs:
         dirs = sorted(Path(run_dir).glob(f"sweep_{arch}_s*"))
@@ -97,27 +115,46 @@ def summarize(archs: list[str], run_dir: str, robot: bool = False) -> dict:
             continue
         df = SummaryReader(str(dirs[-1])).scalars
         def col(tag):
-            s = df[df.tag == tag]
-            return (float(s.value.max()), float(s.value.iloc[-1])) if len(s) else (None, None)
-        it_max, it_last = col("eval/frac_in_tol")
-        ret_max, ret_last = col("eval/episode_return")
-        fill_max, fill_last = col("eval/frac_filled")
-        comp_max, _ = col("eval/completed")
-        _, sps = col("charts/SPS")
-        rows.append({
+            s = df[df.tag == tag].sort_values("step")
+            if not len(s):
+                return None, None, None
+            # last5: mean of the final 5 eval points, not just the single last/max value -
+            # arch_strike_survival is noisy at 3-9 eval episodes/point (see robot18's own
+            # curve: bounces 0.44-1.0 throughout training), so a single spike overstates it.
+            return float(s.value.max()), float(s.value.iloc[-1]), float(s.value.tail(5).mean())
+        it_max, it_last, _ = col("eval/frac_in_tol")
+        ret_max, ret_last, _ = col("eval/episode_return")
+        fill_max, fill_last, _ = col("eval/frac_filled")
+        comp_max, _, _ = col("eval/completed")
+        _, sps, _ = col("charts/SPS")
+        row = {
             "arch": arch, "status": "ok",
             "eval_frac_in_tol_max": it_max, "eval_frac_in_tol_last": it_last,
             "eval_frac_filled_max": fill_max, "eval_completed_max": comp_max,
             "eval_return_max": ret_max, "eval_return_last": ret_last,
             "sps": sps, "final_step": int(df.step.max()) if len(df) else 0,
-        })
-    # rank by within-tolerance precision (headline metric). For the robot task
-    # completion is now saturated on the small eval walls, so in-tol is what
-    # discriminates archs; big-wall generalization is scored post-hoc separately.
-    key = "eval_frac_in_tol_max"
+        }
+        if robot:
+            for group in ("eval_arch", "eval_house"):
+                for tag in ARCH_TAGS:
+                    mx, last, last5 = col(f"{group}/{tag}")
+                    row[f"{group}_{tag}_max"] = mx
+                    row[f"{group}_{tag}_last5"] = last5
+        rows.append(row)
+    # rank by the specific, direct question this sweep asks: does the architecture make the
+    # real held-out uk_terrace jack arch (the diagnosed failure) survive its strike? Falls
+    # back to in-tolerance precision (the base-task/no-arch-training headline metric) when
+    # house-eval tags aren't present (arch_prob_max == 0, or the base bricklayer task).
+    key = "eval_house_jack_survival_last5" if robot else "eval_frac_in_tol_max"
+    scored = [r for r in rows if r.get(key) is not None]
+    if not scored:
+        key = "eval_frac_in_tol_max"
+        scored = [r for r in rows if r.get(key) is not None]
     ranked = sorted(
-        [r for r in rows if r.get(key) is not None],
-        key=lambda r: (r[key], r["eval_return_max"]), reverse=True,
+        scored,
+        key=lambda r: (r[key], r.get("eval_arch_jack_survival_last5") or 0.0,
+                       r.get("eval_frac_in_tol_max") or 0.0, r["eval_return_max"]),
+        reverse=True,
     )
     return {"ranking": ranked, "all": rows, "rank_key": key}
 
@@ -132,6 +169,17 @@ def main() -> None:
                    help="robot: model chooses release height (robot11 drop-height task)")
     p.add_argument("--gpu", action="store_true",
                    help="robot: run matmul-bound archs (cnn/attention) on CUDA")
+    p.add_argument("--async-envs", action="store_true",
+                   help="robot: AsyncVectorEnv (one subprocess per env) instead of sync")
+    p.add_argument("--curriculum", action="store_true",
+                   help="robot: competence-gated SIZE curriculum (blueprint.SIZE_LADDER)")
+    p.add_argument("--curriculum-cap", type=int, default=6)
+    p.add_argument("--arch-prob-max", type=float, default=0.0,
+                   help="robot: fraction of curriculum episodes that build a real structural "
+                        "arch instead of a flat wall (requires --curriculum)")
+    p.add_argument("--scenario-mix", type=float, default=0.35,
+                   help="robot: fraction of episodes drawn from the oracle-gated scenario library")
+    p.add_argument("--eval-suite", default="robot_eval")
     p.add_argument("--action-mode", default="absolute", choices=["absolute", "slot_relative"])
     p.add_argument("--steps", type=int, default=500_000)
     p.add_argument("--num-envs", type=int, default=12)
@@ -143,6 +191,14 @@ def main() -> None:
     p.add_argument("--run-dir", default="runs/sweep")
     a = p.parse_args()
 
+    if a.robot:
+        excluded = [x for x in a.archs if x in ROBOT_INCOMPATIBLE_ARCHS]
+        if excluded:
+            print(f"[sweep] excluding {excluded} - designed for the base task's slot-tensor "
+                  f"obs, not the robot task's flat sensor obs (see ROBOT_INCOMPATIBLE_ARCHS)",
+                  flush=True)
+            a.archs = [x for x in a.archs if x not in ROBOT_INCOMPATIBLE_ARCHS]
+
     Path(a.run_dir).mkdir(parents=True, exist_ok=True)
     task = "robot" if a.robot else f"action_mode={a.action_mode}"
     print(f"[sweep] {len(a.archs)} archs x {a.steps} steps, {task}, concurrency={a.concurrency}",
@@ -150,12 +206,14 @@ def main() -> None:
     run_pool(a.archs, a)
     summary = summarize(a.archs, a.run_dir, robot=a.robot)
     (Path(a.run_dir) / "summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"\n[sweep] RANKING (by max eval frac_in_tol):", flush=True)
+    print(f"\n[sweep] RANKING (by {summary['rank_key']}):", flush=True)
     for i, r in enumerate(summary["ranking"], 1):
-        val = r["eval_frac_in_tol_max"]
+        val = r.get(summary["rank_key"], float("nan"))
         extra = (f"filled {r.get('eval_frac_filled_max', 0):.2f}  "
-                 f"completed {r.get('eval_completed_max', 0):.2f}  ") if a.robot else ""
-        print(f"  {i:2d}. {r['arch']:14s} in_tol {val:.3f}  {extra}"
+                 f"house_jack {r.get('eval_house_jack_survival_last5', float('nan')):.2f}  "
+                 f"house_survive {r.get('eval_house_arch_strike_survival_last5', float('nan')):.2f}  "
+                 ) if a.robot else ""
+        print(f"  {i:2d}. {r['arch']:14s} {summary['rank_key']} {val:.3f}  {extra}"
               f"return {r['eval_return_max']:+.2f}  ({r['sps']:.0f} SPS)", flush=True)
 
 

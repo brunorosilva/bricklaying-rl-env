@@ -88,7 +88,10 @@ the plain MLPs cleanly solved it while the transformers barely learned it. And o
 drop-height task, the ranking was **every 100%-completing backbone is an MLP variant**
 (layernorm/wide/plain), with the spatial ones at the bottom (CNN last, 12% completion) —
 they run on the GPU and still lose to a two-layer MLP on this sample-starved, physics-bound
-env. The bottleneck was always the *problem shaping*, not the network.
+env. The bottleneck was always the *problem shaping*, not the network. (This predates the
+reach-relative/masked encoding below; revisited post-fix for one specific skill — the
+jack-arch strike — in "Does architecture help with the jack-arch strike?" further down: same
+verdict, architecture is a minor lever at best.)
 
 ### Structural arches: rings, centering, and the strike (`robot17`)
 
@@ -162,6 +165,60 @@ policy now builds every course the physics itself permits, then gives up cleanly
 burning its step budget:
 
 ![robot18 attempting the full uk_terrace facade](media/robot18_uk_terrace.gif)
+
+### Does architecture help with the jack-arch strike?
+
+`robot18` closes every ring on `uk_terrace` (100% ring closure, all three styles) but its
+strike survival is uneven across styles: measured directly on this exact facade over 3 seeds,
+**semicircular and segmental survive 3/3, jack survives 0/3**. Unlike the crown-packing limit
+above, this isn't a hard physics ceiling — a jack arch has zero rise (no arch action to
+redistribute load), so it's the least forgiving of small voussoir placement error, which makes
+it a precision problem a policy could plausibly get better at. So: does backbone architecture
+change that?
+
+Reused `train/architectures.py`'s 10-backbone registry (a bake-off harness that already existed
+for the base task — see "Architecture is *not* the lever" above) and retrained all 10 on the
+robot task under `robot18`'s exact recipe (curriculum cap 6, arch mix, scenario mix, 6M steps).
+Two of the ten — `cnn` and `attention`/`attention2` — didn't actually run: they split the
+observation into the base task's `(course × slot)` grid, which the robot task's 28-d flat
+sensor vector doesn't have (that grid was deliberately dropped in an earlier refactor). Fixed
+with a real robot-task analogue for each: `FlatCNN` (1D convs over the sensor vector) and
+`FlatAttention` (each scalar tokenized via a per-feature learned embedding, the numeric-feature-
+tokenization scheme from FT-Transformer, then self-attended) — see `train/architectures.py`.
+
+Ranked by mean `eval_house/jack_survival` — measured directly against the real `uk_terrace`
+plan every eval interval, **across all of training**, not just the final checkpoint: `ppo_robot`
+only ever saves the *latest* state, and this skill oscillates hard for every architecture
+(`relu_wide` hit a sustained 400k-step run of perfect survival, then regressed to a `uk_terrace`-
+specific deadlock — general suite performance stayed at 98%+ throughout — for its last ~560k
+steps; its saved checkpoint is from after that regression). A final-snapshot metric would have
+called it a loser; across-training doesn't.
+
+| architecture | jack survival (mean, full training) | flat-wall in-tol (final) |
+|---|---|---|
+| `relu_wide` (2×256, ReLU) | **59%** | 98.2% |
+| `mlp_dropout` (2×128 + 0.1 dropout) | **52%** | 100% |
+| `attention2` (2-layer FlatAttention) | 36% | 100% |
+| `cnn` (FlatCNN) | 30% | 97.0% |
+| `mlp` (baseline, = shipped `robot18`) | 27% | 95.0% |
+| `attention` (1-layer FlatAttention) | 23% | 97.7% |
+| `resmlp` | 21% | 97.9% |
+| `mlp_layernorm` | 20% | 97.3% |
+| `mlp_deep` (3×128) | 10% | 82.7% |
+| `mlp_wide` (2×256, tanh) | 9% | 85.3% |
+
+![Ranking: mean jack-arch strike survival across training, by architecture](media/arch_sweep_ranking.png)
+![Jack-arch survival over training - baseline vs. top two challengers, rolling mean](media/arch_sweep_trajectory.png)
+
+Architecture is a real lever here, just not a decisive one. A plain activation swap
+(tanh→ReLU) or adding dropout roughly **doubles** the survival rate over the shipped baseline —
+this reads as capacity/regularization, not something specific to CNN/attention's inductive
+bias (both fixed spatial backbones land in the middle of the pack, not at either end). But the
+trajectory chart is the more honest result: **every** architecture oscillates and none
+converges — this remains a real, unsolved precision problem, not a solved one with a better
+backbone. None of these checkpoints replaces `robot18`; this was a diagnostic sweep, not a
+promotion. (`scripts/plot_arch_sweep.py` regenerates both figures from the TensorBoard logs in
+`runs/sweep_archbakeoff*/`.)
 
 ---
 
@@ -390,6 +447,12 @@ connected panels**; then the robot fills a whole facade the way it fills a singl
   strike survival. Open thread: `uk_terrace`'s jack-arch crown is still a genuine physics
   limit (0.61 oracle ceiling), not an MDP/training gap — needs an actual physics fix (a joint-
   bridging cap across the ring's own top, not another reward/observation change) to close.
+- ~~Does architecture close the jack-arch strike-survival gap?~~ ✅ **explored** (10-backbone
+  bake-off, see above) — partial: `relu_wide`/`mlp_dropout` roughly double the baseline's
+  survival rate, but none converges. Open thread: add best-checkpoint tracking to
+  `ppo_robot.py` (it only ever saves the latest state) and retrain the top 1-2 architectures
+  specifically to actually land a deployable checkpoint at their peak, not wherever training
+  happened to end.
 - **Build all sides of a house** — multi-wall structures with corners.
 - **Arm kinematics** — polar reach / an actual arm instead of a rail; eventually 3D.
 - ~~3D web viewer~~ ✅ **v1 done** — a react-three-fiber scene alongside the original 2D
