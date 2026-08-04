@@ -25,7 +25,7 @@ import numpy as np
 from tbparse import SummaryReader
 
 # same tokens as scripts/plot_robot_curves.py / plot_curves.py - one figure language
-# across the repo. Validated (scripts/validate_palette.js, --mode light).
+# across the repo.
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
 ACCENT = "#2a78d6"
 SERIES = (ACCENT, "#eb6834", "#1baf7a")  # baseline, then up to 2 challengers, fixed order

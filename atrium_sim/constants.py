@@ -89,7 +89,6 @@ VOUSSOIR_TILT_RANGE_DEG = 8.0
 REACH_MM = 500.0            # horizontal reach each side of the base
 MOVE_STEP_MM = 220.0        # one module per move
 MOVE_COST_FRAC = 0.05       # per-move cost as a fraction of one perfect brick's reward
-INVALID_PLACE_FRAC = 0.05   # cost of a PLACE with nothing reachable to place
 
 # --- Observation / eval maxima (10 modules x 6 courses) ---
 # These bound the base BrickLayer env's fixed C_MAX x S_MAX slot grid. The mobile robot

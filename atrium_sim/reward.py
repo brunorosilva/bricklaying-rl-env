@@ -38,9 +38,9 @@ from atrium_sim.physics import BrickPose
 class RewardConfig:
     # --- tolerance & shaping ---
     tol_mm: float = TOL_MM          # BIM position tolerance; full-reward plateau half-width
-    sigma_mm: float = 12.0          # Gaussian shoulder beyond the plateau; curriculum: 25 -> 12
+    sigma_mm: float = 12.0          # Gaussian shoulder beyond the plateau; robot18 overrides to 6.0
     tol_deg: float = TOL_DEG        # levelness plateau half-width
-    sigma_deg: float = 2.0          # angular shoulder; curriculum: 4 -> 2
+    sigma_deg: float = 2.0          # angular shoulder half-width
     match_gate_mm: float = MATCH_GATE_MM  # MUST stay < 60 = half the min same-kind target distance
     match_gate_rad: float = MATCH_GATE_RAD
     # --- aggregation ---
@@ -54,11 +54,6 @@ class RewardConfig:
     collapse_frac: float = 0.25
     # --- reporting only (no reward effect) ---
     bond_align_mm: float = 45.0     # adjacent-course head joints closer than this = bond violation
-
-    @property
-    def step_cost(self) -> float:
-        """Per-step cost per blueprint target: c_step_frac * r_scale / N (N applied by caller)."""
-        return self.c_step_frac * self.r_scale
 
 
 @dataclass(frozen=True)
@@ -208,13 +203,10 @@ def audit(
     counters owned by the environment.
 
     `exempt_brick_ids`: bricks that are correctly placed but structurally outside this
-    audit's scope - concretely, VOUSSOIRs. `blueprint.targets` holds no VOUSSOIR targets
-    (a real arch ring isn't course-aligned, so it lives in the env's own separate pool -
-    see atrium_sim.envs.robot_env), so `match_bricks`'s kind filter can never match one to
-    anything: every correctly-seated voussoir would otherwise be counted as a stray and
-    charged `c_waste` per brick, forever (confirmed: this was the single most influential
-    input to the trained policy's mode head, and past ~1/3 stray_frac it locked the policy
-    into permanently avoiding PLACE even with a flat target in reach).
+    audit's scope - concretely, VOUSSOIRs. `blueprint.targets` holds no VOUSSOIR targets (a
+    real arch ring lives in the env's own separate pool, see atrium_sim.envs.robot_env), so
+    without this exemption every correctly-seated voussoir would score as a stray, charged
+    `c_waste` forever.
     """
     raw_matches, missing, strays = match_bricks(bricks, blueprint, cfg)
     strays = [b for b in strays if b not in exempt_brick_ids]

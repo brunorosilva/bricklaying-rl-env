@@ -29,11 +29,6 @@ from train.architectures import ARCHITECTURES
 # the GPU would only add host<->device transfer overhead — keep them on CPU.
 GPU_ARCHS = {"cnn", "attention", "attention2"}
 
-# no longer any robot-incompatible archs: train.architectures.build_backbone now
-# dispatches cnn/attention/attention2 to flat-obs variants (FlatCNN/FlatAttention) for
-# any obs_dim other than the base task's 538, so they build for the robot task too.
-ROBOT_INCOMPATIBLE_ARCHS: set[str] = set()
-
 
 def launch(arch: str, a: argparse.Namespace) -> subprocess.Popen:
     # transformers are matmul-bound (not env-bound like the MLPs), so give them
@@ -190,14 +185,6 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--run-dir", default="runs/sweep")
     a = p.parse_args()
-
-    if a.robot:
-        excluded = [x for x in a.archs if x in ROBOT_INCOMPATIBLE_ARCHS]
-        if excluded:
-            print(f"[sweep] excluding {excluded} - designed for the base task's slot-tensor "
-                  f"obs, not the robot task's flat sensor obs (see ROBOT_INCOMPATIBLE_ARCHS)",
-                  flush=True)
-            a.archs = [x for x in a.archs if x not in ROBOT_INCOMPATIBLE_ARCHS]
 
     Path(a.run_dir).mkdir(parents=True, exist_ok=True)
     task = "robot" if a.robot else f"action_mode={a.action_mode}"

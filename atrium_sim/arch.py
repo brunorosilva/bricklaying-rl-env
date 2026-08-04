@@ -181,10 +181,6 @@ def wedge_verts_mass_kg(wedge_verts: tuple[tuple[float, float], ...]) -> float:
     return BRICK_MASS_KG * _polygon_area(wedge_verts) / (FULL_ENVELOPE[0] * FULL_ENVELOPE[1])
 
 
-def wedge_mass_kg(wedge: Wedge) -> float:
-    return wedge_verts_mass_kg(wedge.verts)
-
-
 def _finalize(true_verts: tuple[tuple[float, float], ...], theta: float, index: int) -> Wedge:
     """Given a wedge's TRUE final shape (already correctly positioned/oriented, in the arch's
     local frame) and the `theta` physics should apply at spawn time, de-rotate the shape by
@@ -472,9 +468,3 @@ def ring_drift(before: dict[int, tuple[float, float, float]],
 
 def survived(max_drift_mm: float, max_tilt_deg: float) -> bool:
     return max_drift_mm < SURVIVAL_DRIFT_MM and max_tilt_deg < SURVIVAL_TILT_DEG
-
-
-def middle_third_ok(eccentricity_mm: float, ring_depth_mm: float) -> bool:
-    """BIA's middle-third rule: the thrust line must stay within the middle third of the ring
-    depth, i.e. |e| <= d/6."""
-    return abs(eccentricity_mm) <= ring_depth_mm / 6.0

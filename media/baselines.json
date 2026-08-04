@@ -6,24 +6,24 @@
     "waste_frac": 0.0,
     "completed": 1.0,
     "score": 1.0,
-    "mean_abs_dev_mm": 0.2791745629113603
+    "mean_abs_dev_mm": 0.27917456291136034
   },
   "greedy": {
-    "episode_return": -2.1773739303285606,
+    "episode_return": -2.2302115217199936,
     "frac_in_tol": 0.2443181818181818,
-    "frac_filled": 0.29545454545454547,
-    "waste_frac": 0.8778409090909092,
+    "frac_filled": 0.2850378787878788,
+    "waste_frac": 0.8882575757575758,
     "completed": 0.0,
-    "score": -0.19427148394194685,
-    "mean_abs_dev_mm": 5.944451475539741
+    "score": -0.19955524308109018,
+    "mean_abs_dev_mm": 4.909559583148255
   },
   "random": {
-    "episode_return": -7.869149858891078,
-    "frac_in_tol": 0.003787878787878788,
-    "frac_filled": 0.062263257575757576,
-    "waste_frac": 1.550662878787879,
+    "episode_return": -7.714239242362344,
+    "frac_in_tol": 0.010700757575757577,
+    "frac_filled": 0.04895833333333333,
+    "waste_frac": 1.5636363636363635,
     "completed": 0.0,
-    "score": -0.763449076798199,
-    "mean_abs_dev_mm": 24.929630028010845
+    "score": -0.7479580151453256,
+    "mean_abs_dev_mm": 11.905522287635058
   }
 }

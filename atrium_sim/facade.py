@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from atrium_sim.arch import (
     ArchSpec,
@@ -33,7 +33,6 @@ from atrium_sim.blueprint import (
 )
 from atrium_sim.constants import COURSE_MM, MODULE_MM, SHAPE_RADIUS
 
-ARCH_STYLES = ("flat", "lintel_soldier", "semicircular", "segmental", "jack")
 STRUCTURAL_ARCH_STYLES = ("semicircular", "segmental", "jack")
 
 PACKING_CLEARANCE_MM = 6.0
@@ -86,7 +85,6 @@ class HardBody:
     kind: str
     verts_mm: tuple[tuple[float, float], ...]
     trigger_course: int
-    static: bool = True
 
 
 @dataclass(frozen=True)

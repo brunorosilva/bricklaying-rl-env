@@ -48,7 +48,8 @@ class Args:
     clip_vloss: bool = True
     ent_coef: float = 0.02      # exploration bonus on the MOVE/PLACE head (keeps it
                                 # from collapsing to always-move before it learns to place)
-    ent_coef_box: float = 0.0   # none on the Gaussian offset/kind (avoids std runaway)
+    ent_coef_box: float = 0.0   # entropy bonus on the Gaussian offset/kind; 0.0 in every
+                                # shipped run (avoids std runaway), effectively inert
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     arch: str = "mlp"
@@ -56,34 +57,28 @@ class Args:
     async_envs: bool = False    # AsyncVectorEnv (one subprocess per env) instead of the default
                                 # single-process SyncVectorEnv. When curriculum is also on, the
                                 # shared level holder is upgraded to a multiprocessing.Manager
-                                # dict so level advances still reach every worker (a plain dict
-                                # would be copied into each subprocess at startup and never see
-                                # later updates from the main process).
+                                # dict so level advances still reach every worker.
     device: str = "cpu"         # "cuda" to train on GPU (helps the matmul-bound
                                 # transformer/cnn archs; MLPs stay env-bound so cpu is fine)
-    random_start: bool = False  # False = base always starts at the left end (robot8): the
-                                # leftmost-first staircase then completes in a pure rightward
-                                # sweep, so MOVE_LEFT is never needed/learned. True (robot9)
-                                # starts the base at a random point so work is sometimes to the
-                                # LEFT -> reach-shaping rewards moving left -> learns to navigate
-                                # both directions (robust to any start), not just sweep right.
-    drop_control: bool = False  # box[1] chooses the release height (the arm homes at the wall
-                                # top; the model lowers it before releasing). Impact velocity is
-                                # an emergent consequence of the fall -> precision via physics.
-    drop_penalty_frac: float = 0.0  # penalize the release height (~ impact energy) so the model
-                                    # is pushed toward realistic gentle placement (drop mode only)
+    random_start: bool = False  # False = base always starts at the left end, so a leftmost-
+                                # first build never needs MOVE_LEFT. True starts the base at a
+                                # random point so work is sometimes to the LEFT, forcing it to
+                                # learn to navigate both directions.
+    drop_control: bool = False  # box[2] chooses the release height (the arm homes at the wall
+                                # top; the model lowers it before releasing). Historical: off
+                                # in robot18 (see README for the drop-height result).
+    drop_penalty_frac: float = 0.0  # penalize the release height (~ impact energy), drop mode
+                                    # only. Historical: off in robot18.
     prefill_prob: float = 0.0   # fraction of episodes that start with a random partial structure
                                 # already built (the robot must complete a standing wall)
-    fall_off_edge: bool = False  # driving off the end of the rail topples the gantry (episode ends)
+    fall_off_edge: bool = False  # driving off the end of the rail topples the gantry (episode
+                                 # ends). Historical: off in robot18.
     action_mask: bool = True    # mask PLACE-with-nothing-reachable and a MOVE that would only
                                 # clamp to the same rail position out of the mode head's logits
                                 # (see HybridAgent.mask_dim / robot_env._obs's mask_place/left/
-                                # right) - the direct fix for the length-normalized dead band
-                                # that let the policy choose PLACE into thin air on any wall
-                                # longer than it trained on ("stops in place"). False reproduces
-                                # the pre-mask behavior (e.g. to A/B against the reward-only fix).
-    suite: str = "robot"        # small walls (3-5 modules): completable, so it learns to
-                                # finish a course and stack levels (big walls are too long-horizon)
+                                # right). False reproduces the pre-mask behavior.
+    suite: str = "robot"        # fixed wall-size suite; IGNORED once curriculum=True (the
+                                # curriculum's own SIZE_LADDER takes over wall sizing instead)
     eval_suite: str = "robot_eval"
     sigma_mm: float = 6.0       # sharp shoulder: precision within the reach window
     sigma_deg: float = 2.0
@@ -95,39 +90,21 @@ class Args:
     wandb_project: str = "atrium-sim"
     curriculum: bool = False    # competence-gated SIZE curriculum: start on small walls and grow
                                 # the max wall size as the policy masters each frontier (the core
-                                # generalization lever). Uses blueprint.SIZE_LADDER. Overrides --suite.
+                                # generalization lever). Uses blueprint.SIZE_LADDER; overrides suite.
     start_level: int = 0
     advance_threshold: float = 0.9   # advance a rung when frontier frac_filled >= this ...
     advance_patience: int = 2        # ... for this many consecutive evals in a row
     curriculum_cap: int = 6          # don't advance past this rung (6 = 20x14, the top of
-                                     # SIZE_LADDER). Was 3 (10x6): every robot16/17/17arch run
-                                     # trained on walls no longer than 2640mm at cap 4, which is
-                                     # exactly where the length-normalized dead band (now fixed -
-                                     # see robot_env._obs) first opens up. Raised now that the
-                                     # encoding is reach-relative and the failure is masked out
-                                     # structurally rather than merely discouraged; the held-out
-                                     # generalization metric moves to the scenario library and
-                                     # ROBOT_HUGE_EVAL/eval_suite instead of a size the policy
-                                     # never trains on.
+                                     # SIZE_LADDER).
     arch_prob_max: float = 0.0       # cap on the fraction of curriculum episodes that build a
                                      # real structural arch (atrium_sim.facade.sample_arch_plan)
-                                     # instead of a flat WallSpec. 0.0 (default) = no arches, the
-                                     # exact prior behavior. Requires --curriculum (arches ride
-                                     # the same competence-gated size schedule: bigger/harder
-                                     # styles only become reachable at higher rungs).
-    arch_prob_per_level: float = 0.15  # arch_prob ramps by this much per curriculum rung, capped
-                                       # at arch_prob_max - was 0.05, which at the OLD curriculum_
-                                       # cap=3/4 never exceeded 0.15/0.20 of the nominal 0.3 (the
-                                       # frequency is coupled to how far the SIZE curriculum has
-                                       # advanced, an unrelated axis). 0.15 reaches arch_prob_max
-                                       # by level 2 - where jack arches first become sampleable
-                                       # (sample_arch_plan's own grid-size gate) - independent of
-                                       # curriculum_cap, so raising the cap for size no longer
-                                       # silently caps arch frequency too.
+                                     # instead of a flat WallSpec. Requires curriculum (arches
+                                     # ride the same competence-gated size schedule).
+    arch_prob_per_level: float = 0.15  # arch_prob ramps by this much per curriculum rung,
+                                       # capped at arch_prob_max.
     scenario_mix: float = 0.35       # fraction of episodes drawn from the oracle-gated scenario
                                      # library (atrium_sim.scenarios) instead of the size/arch
-                                     # curriculum - see RobotEnvConfig.scenario_mix. Mixed in
-                                     # alongside arch_prob_*, same "never replacing" pattern.
+                                     # curriculum - mixed in alongside arch_prob_*, not replacing it.
 
 
 def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
@@ -138,19 +115,14 @@ def make_env(suite: str, sigma_mm: float, sigma_deg: float, random_start: bool,
     def thunk():
         env = gym.make("atrium_sim/BrickLayerRobot-v0")
         u = env.unwrapped
-        # c_reach 4x: strongly reward moving toward the nearest open slot (either
-        # direction). random_start controls whether work can be to the LEFT of the
-        # base (forcing MOVE_LEFT to be learned) or always to the right (sweep only).
-        # drop_control: box[1] chooses the release height (impact velocity is emergent);
-        # drop_penalty_frac penalizes a high release toward gentle placement.
-        # prefill_prob: some episodes start with a random partial structure to complete.
-        # curriculum (a shared {"level": int} holder, or None): when set, the env samples the
-        # wall size from the curriculum frontier instead of the fixed suite.
-        # arch_prob_max/arch_prob_per_level: a ramping fraction of curriculum episodes build a
-        # real structural arch (see RobotEnvConfig.arch_prob_*) instead of a flat WallSpec.
-        # scenario_mix: a fraction of episodes drawn from atrium_sim.scenarios instead (isolated
-        # skill practice - a known exact walking distance, a void wider than reach, ...).
-        u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
+        # random_start controls whether work can be to the LEFT of the base (forcing
+        # MOVE_LEFT to be learned) or always to the right (sweep only). curriculum (a shared
+        # {"level": int} holder, or None): when set, the env samples the wall size from the
+        # curriculum frontier instead of the fixed suite. arch_prob_max/arch_prob_per_level: a
+        # ramping fraction of curriculum episodes build a real structural arch instead of a
+        # flat WallSpec. scenario_mix: a fraction of episodes drawn from atrium_sim.scenarios
+        # instead (isolated skill practice).
+        u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start,
                                     drop_control=drop_control,
                                     drop_penalty_frac=drop_penalty_frac,
                                     prefill_prob=prefill_prob,
@@ -176,7 +148,7 @@ def evaluate_robot(agent: HybridAgent, episodes: int, suite: str, sigma_mm: floa
                    fall_off_edge: bool = False, level: int | None = None) -> dict:
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start, c_reach=2.0,
+    u.env_cfg = type(u.env_cfg)(suite=suite, random_start=random_start,
                                 drop_control=drop_control,
                                 drop_penalty_frac=drop_penalty_frac,
                                 prefill_prob=prefill_prob,
@@ -232,7 +204,7 @@ def evaluate_robot_arch(agent: HybridAgent, episodes: int, sigma_mm: float, sigm
 
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.env_cfg = type(u.env_cfg)(random_start=random_start)
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
                                       collapse_penalty=0.5, c_waste=0.25)  # match training
     policy = HybridAgentPolicy(agent)
@@ -272,7 +244,7 @@ def evaluate_robot_house(agent: HybridAgent, episodes: int, sigma_mm: float, sig
     plan = FacadePlan.from_json(Path(plan_path).read_text())
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.env_cfg = type(u.env_cfg)(random_start=random_start)
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
                                       collapse_penalty=0.5, c_waste=0.25)  # match training
     policy = HybridAgentPolicy(agent)
@@ -309,7 +281,7 @@ def evaluate_robot_scenarios(agent: HybridAgent, sigma_mm: float, sigma_deg: flo
 
     env = gym.make("atrium_sim/BrickLayerRobot-v0")
     u = env.unwrapped
-    u.env_cfg = type(u.env_cfg)(random_start=random_start, c_reach=2.0)
+    u.env_cfg = type(u.env_cfg)(random_start=random_start)
     u.reward_cfg = type(u.reward_cfg)(sigma_mm=sigma_mm, sigma_deg=sigma_deg,
                                       collapse_penalty=0.5, c_waste=0.25)
     policy = HybridAgentPolicy(agent)
@@ -569,7 +541,7 @@ def main(args: Args) -> dict:
 
                     genv = gym.make("atrium_sim/BrickLayerRobot-v0", render_mode="rgb_array")
                     genv.unwrapped.env_cfg = type(genv.unwrapped.env_cfg)(
-                        random_start=args.random_start, c_reach=2.0,
+                        random_start=args.random_start,
                         drop_control=args.drop_control,
                         drop_penalty_frac=args.drop_penalty_frac,
                         prefill_prob=args.prefill_prob,

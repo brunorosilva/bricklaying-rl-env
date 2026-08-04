@@ -31,7 +31,6 @@ import numpy as np
 from gymnasium import spaces
 
 from atrium_sim.arch import (
-    build_order as arch_build_order,
     ring_drift as arch_ring_drift,
     survived as arch_survived,
     voussoir_quality,
@@ -74,12 +73,10 @@ _ERR_NORM_MM = 30.0   # dx/dy sensor normaliser (full resolution around +-3mm, c
 _REACH_SHAPING_CAP_MM = 2000.0   # _reach_potential's normalizer - a fixed, reach-scale distance
                                   # (4x REACH_MM), not wall length, so a move is worth the same
                                   # shaping reward on every wall size (see _reach_potential)
-OBS_DIM = 28   # +6 over the pre-stall-fix 22: far-field walking distance, last-PLACE-invalid,
-              # consecutive-invalid streak, and the 3-mode action mask (mask_place/left/right -
-              # see train.agent.HybridAgent.mask_dim, which reads these as the LAST mask_dim
-              # columns rather than a separate info key). Also invalidates every older
-              # checkpoint's obs_dim (robot16 already didn't load at 20; this moves the
-              # boundary to 22).
+OBS_DIM = 28   # far-field walking distance, last-PLACE-invalid, consecutive-invalid streak, and
+              # the 3-mode action mask (mask_place/left/right - see train.agent.HybridAgent.
+              # mask_dim, which reads these as the LAST mask_dim columns rather than a separate
+              # info key). A checkpoint's saved obs_dim must match this exactly to load.
 
 
 class Mode(IntEnum):
@@ -94,96 +91,69 @@ class RobotEnvConfig:
     move_step_mm: float = MOVE_STEP_MM
     offset_range_mm: float = OFFSET_RANGE_MM
     move_cost_frac: float = MOVE_COST_FRAC
-    invalid_place_frac: float = 0.02  # was softened to 0.0 - reach-shaping alone was meant to
-                                      # supply the move incentive, so PLACE-when-stuck went
-                                      # unpunished (avoiding teaching "placing is bad"). With
-                                      # PLACE now MASKED whenever nothing is reachable (see
-                                      # train.agent's mask_dim), this only ever fires for an
-                                      # untrained/exploring/mask-ignoring actor - a small,
-                                      # ramped (see _do_place) belt-and-braces cost rather than
-                                      # the primary anti-stall lever, which the mask now is.
-    c_reach: float = 0.5              # potential-based shaping: dense reward for moving the
+    invalid_place_frac: float = 0.02  # ramped belt-and-braces cost for an untrained/exploring
+                                      # actor (see _do_place); the action mask (train.agent's
+                                      # mask_dim) is the primary anti-stall lever.
+    c_reach: float = 2.0               # potential-based shaping: dense reward for moving the
                                       # base toward the nearest unplaced target (Ng et al.;
-                                      # optimal-policy-invariant). Supplies the directional
-                                      # movement signal that was missing.
-    course_bonus_frac: float = 0.3    # course-completion milestone, as a fraction of r_scale spread
-                                      # over ALL courses: total course mass = course_bonus_frac*r_scale
-                                      # for ANY wall height (was a FLAT 1.0/course = n_courses total,
-                                      # which on a 12-course wall was 12 > r_scale=10 and drowned the
-                                      # /N per-brick precision reward - the reward-scale bug that made
-                                      # tall walls collapse). Potential-based, so optimal-policy-invariant.
+                                      # optimal-policy-invariant).
+    course_bonus_frac: float = 0.3    # course-completion milestone, as a fraction of r_scale
+                                      # spread over ALL courses: total course mass is
+                                      # course_bonus_frac*r_scale for ANY wall height. Potential-
+                                      # based, so optimal-policy-invariant.
     wander_threshold: int = 3         # a run of >= this many consecutive MOVEs with no brick
                                       # placed in between is "wandering"; each move at/after the
-                                      # threshold takes wander_penalty. Directly attacks the
-                                      # degenerate "move forever, never place" policy (which is
-                                      # exactly how the agent fails on out-of-distribution walls).
+                                      # threshold takes wander_penalty.
     wander_penalty_frac: float = 0.1  # per-move penalty once wandering (x r_scale/n_targets);
                                       # a successful placement resets the streak to 0.
-    random_start: bool = True         # start the base at a random point on the rail (not always
-                                      # x=0), so work is sometimes to the LEFT and the agent has
-                                      # to learn MOVE_LEFT - without this it only ever sweeps right,
-                                      # can't backtrack for gaps, and never returns to build up.
+    random_start: bool = True         # start the base at a random point on the rail so work is
+                                      # sometimes to the LEFT, forcing MOVE_LEFT to be learned.
     drop_control: bool = False        # when True the model chooses the RELEASE HEIGHT: the arm
-                                      # homes at the wall top and box[1] (the otherwise-vestigial
-                                      # kind dim) picks how far to lower it before release. Impact
-                                      # velocity is then an emergent consequence of the fall.
-                                      # False => identical to before (fixed gentle drop).
+                                      # homes at the wall top and box[2] picks how far to lower
+                                      # it before release, so impact velocity is an emergent
+                                      # consequence of the fall. Historical: off in robot18.
     arm_margin_mm: float = DROP_ARM_MARGIN_MM   # arm "home" height above the wall top (drop mode)
     drop_penalty_frac: float = 0.0    # drop mode: penalize the release HEIGHT (penalty ~
-                                      # fall_frac x this x r_scale/n) so slamming bricks from
-                                      # the top costs reward -> pushes toward gentle placement.
+                                      # fall_frac x this x r_scale/n). Historical: off in robot18
+                                      # (measurably hurts precision, see README).
     prefill_prob: float = 0.0         # probability an episode STARTS with a random, support-closed
-                                      # (physically stable) partial structure already built, at
-                                      # exact targets - the robot must COMPLETE a standing wall
-                                      # rather than always build from scratch.
+                                      # partial structure already built - the robot must COMPLETE
+                                      # a standing wall rather than always build from scratch.
     prefill_max_frac: float = 0.7     # cap on the fraction of the wall pre-placed (random 1..this*n)
     fall_off_edge: bool = False       # a real gantry rides a finite rail: if it's already at an
                                       # end and commands a move further off that end, it drives
                                       # off and topples -> the episode ends (charged fall_penalty).
+                                      # Historical: off in robot18.
     fall_penalty: float = 1.0         # reward charged for driving off the end of the rail
     max_settle_substeps: int = MAX_SETTLE_SUBSTEPS
     final_settle_substeps: int = FINAL_SETTLE_SUBSTEPS
     overhang_mm: float = OVERHANG_MM
     voussoir_tilt_range_deg: float = VOUSSOIR_TILT_RANGE_DEG   # box[1]'s tilt-nudge range,
-                                      # VOUSSOIR placements only (flat bricks: box[1] inert,
-                                      # exactly like release-height's existing pattern)
+                                      # VOUSSOIR placements only (flat bricks: box[1] inert)
     arch_ring_closure_frac: float = 0.3   # potential-based, mirrors course_bonus_frac: total
                                       # ring-closure reward mass across ALL arches combined is
-                                      # arch_ring_closure_frac*r_scale, for any number/size of
-                                      # arches (size-invariant)
+                                      # arch_ring_closure_frac*r_scale (size-invariant)
     arch_survive_bonus: float = 1.0  # terminal-style bonus, paid the instant a ring survives
-                                      # its strike (not gated on episode end - it's a real,
-                                      # checkable event the moment the centering comes out)
+                                      # its strike (not gated on episode end)
     arch_collapse_penalty: float = 1.0   # symmetric penalty if a ring does NOT survive its strike
     suite: str = "train"
     curriculum: bool = False          # when True, reset() samples the wall size from the
                                       # curriculum frontier (self._curriculum["level"], a mutable
-                                      # holder the trainer advances) instead of the fixed suite -
-                                      # a competence-gated size schedule (the generalization lever).
+                                      # holder the trainer advances) instead of the fixed suite.
     arch_prob_max: float = 0.0        # cap on the fraction of curriculum episodes that build an
                                       # arch-bearing facade (atrium_sim.facade.sample_arch_plan)
-                                      # instead of a plain flat WallSpec. 0.0 (default) is
-                                      # byte-identical to before this existed - arches only enter
-                                      # training when explicitly opted in via this and curriculum.
-    arch_prob_per_level: float = 0.05   # arch_prob ramps by this much per curriculum rung
-                                      # (capped at arch_prob_max) - larger/harder arch styles
-                                      # only become reachable at higher rungs anyway (see
-                                      # sample_arch_plan's own grid-size gate), so this mirrors
-                                      # that ramp in HOW OFTEN arches appear, not just WHICH ones.
+                                      # instead of a plain flat WallSpec (requires curriculum).
+    arch_prob_per_level: float = 0.05   # arch_prob ramps by this much per curriculum rung,
+                                      # capped at arch_prob_max.
     scenario_mix: float = 0.0        # fraction of episodes drawn from the oracle-gated scenario
                                       # library (atrium_sim.scenarios.sample) instead of the size/
-                                      # arch curriculum - isolated skill practice (a known exact
-                                      # walking distance, a void wider than reach, a ragged multi-
-                                      # opening course, ...) alongside the general curriculum, the
-                                      # same "mixed in, never replacing" pattern as arch_prob_*.
-                                      # 0.0 (default) is byte-identical to before this existed.
+                                      # arch curriculum - isolated skill practice, mixed in
+                                      # alongside arch_prob_* rather than replacing it.
     max_place_attempts: int = 3      # give-up threshold: a target that fails to seat (spawn
                                       # blocked, or placed but out of the match gate) this many
                                       # CONSECUTIVE times is abandoned - any lingering stray
                                       # brick is removed and the target is excluded from future
-                                      # candidates. Without this a genuinely unbuildable slot
-                                      # (e.g. a physics defect right above an arch) is offered
-                                      # forever: confirmed 500+ wasted steps hammering one target.
+                                      # candidates.
 
 
 class BrickLayerRobotEnv(gym.Env):
@@ -256,7 +226,6 @@ class BrickLayerRobotEnv(gym.Env):
         # static hard bodies (lintels/sills/cement) spawned as the build reaches their course
         self._pending_hard = list(plan.hard_bodies()) if plan is not None and hasattr(plan, "hard_bodies") else []
         self._spawned_hard: set[int] = set()
-        self._support = self._compute_support(self.blueprint)
         # real structural arches (see atrium_sim.arch/facade.ArchRegion): voussoir BrickTargets
         # live in a SEPARATE pool, not self.blueprint.targets - an arch's ring isn't course-
         # aligned (a semicircular ring's rise spans several courses of height at varying width),
@@ -316,8 +285,6 @@ class BrickLayerRobotEnv(gym.Env):
         self.placements = 0
         self.moves = 0
         self._moves_since_place = 0   # consecutive MOVEs since the last brick placed (wander)
-        self._release_y = None        # drop-control: last release height (for the renderer)
-        self._arm_top_y = None
         self._fall_frac = 0.0         # drop-control: last normalized drop height (for the penalty)
         self._fell = False            # drove off the end of the rail this episode
         self._deadlocked = False      # no action can ever make further progress (give-up path)
@@ -490,7 +457,6 @@ class BrickLayerRobotEnv(gym.Env):
         self.placements += 1
         self._moves_since_place = 0  # placing a brick resets the wander streak
         release_y = self._release_height(target.course, box) if self.env_cfg.drop_control else None
-        self._release_y = release_y
         pre = self.world.positions()
         bid = self.world.spawn_brick(x, kind, target.course, release_y=release_y,
                                      theta=target.theta, rest_y=target.y)
@@ -506,10 +472,9 @@ class BrickLayerRobotEnv(gym.Env):
         if lm is not None:
             self._clear_attempt(target.tid)
         elif self._note_failed_attempt(target.tid):
-            # give up: this target has failed to seat max_place_attempts times running.
-            # A lingering stray brick (bid not None, but out of the match gate) would
-            # otherwise physically block the spawn probe at this slot forever (confirmed:
-            # 500+ wasted steps hammering one target above a since-fixed physics defect).
+            # give up: this target has failed to seat max_place_attempts times running. A
+            # lingering stray brick (bid not None, but out of the match gate) would otherwise
+            # physically block the spawn probe at this slot forever.
             self._abandoned.add(target.tid)
             if bid is not None:
                 self.world.remove_brick(bid)
@@ -531,7 +496,6 @@ class BrickLayerRobotEnv(gym.Env):
         lower_frac = (float(box[2]) + 1.0) / 2.0
         gentle_y = COURSE_MM * (course + 0.5) + SPAWN_DROP_MM
         arm_top_y = COURSE_MM * self.blueprint.n_courses + self.env_cfg.arm_margin_mm
-        self._arm_top_y = arm_top_y
         release_y = gentle_y + (1.0 - lower_frac) * max(0.0, arm_top_y - gentle_y)
         release_y = float(np.clip(release_y, gentle_y, H_MAX + 120.0 - 1.0))
         # normalized drop height (0 gentle .. 1 released from the top) for the penalty
@@ -742,23 +706,6 @@ class BrickLayerRobotEnv(gym.Env):
 
     # --- reachability ---------------------------------------------------------
 
-    @staticmethod
-    def _compute_support(bp: Blueprint) -> dict[int, list[int]]:
-        """Map each course>0 target to the course-below targets it physically rests
-        on (face spans overlapping by >30mm). Precomputed once per reset."""
-        support: dict[int, list[int]] = {}
-        for c in range(1, bp.n_courses):
-            below = bp.course_targets(c - 1)
-            for t in bp.course_targets(c):
-                tw = brick_face(t.kind)[0]
-                ta, tb = t.x - tw / 2, t.x + tw / 2
-                support[t.tid] = [
-                    b.tid for b in below
-                    if min(tb, b.x + brick_face(b.kind)[0] / 2)
-                    - max(ta, b.x - brick_face(b.kind)[0] / 2) > 30.0
-                ]
-        return support
-
     def _active_course(self) -> int:
         """Lowest course with an unfilled target (obs feature only)."""
         matched = {m.target_id for m in self.report.matches}
@@ -771,22 +718,15 @@ class BrickLayerRobotEnv(gym.Env):
     def _supported(self, t: BrickTarget, matched: set[int]) -> bool:
         """Level (course-by-course) placeability: a course-c brick is placeable only once
         EVERY brick in course c-1 is placed. This enforces real-bricklaying order - finish
-        and level each course across the whole wall before ascending - and REPLACES the old
-        support-closed staircase (which climbed diagonally at the left edge and left the top
-        courses unbuilt on tall walls, the exact OOD-collapse pattern). The regular
-        left-to-right/course-by-course decision is also size-invariant, so it extrapolates to
-        walls bigger than trained on. _compute_support/self._support are kept for physics/info;
-        this gate is independent of them.
+        and level each course across the whole wall before ascending - and is size-invariant,
+        so it extrapolates to walls bigger than trained on.
 
         Real arch voussoirs live in a SEPARATE pool (self._arch_targets), so a flat target's
         OWN course never directly contains them - but a flat target at or above an arch's
         crown_course, over that arch's span, is only genuinely supported once the ring beneath
         it has been STRUCK AND SURVIVED, not merely once the (empty, void) flat course below it
-        is trivially "complete". Without this check the level gate - which knows nothing about
-        arches - would offer crown-course targets while the ring is still mid-build (or, worse,
-        never survives), and a policy would burn its whole budget hammering a target with
-        nothing yet beneath it (discovered in-session: 100s of wasted attempts at the exact
-        crown course, every time, until this gate was added)."""
+        is trivially "complete". Without this check the level gate would offer crown-course
+        targets while the ring is still mid-build (or never survives)."""
         if t.course == 0:
             return True
         if not all(b.tid in matched for b in self.blueprint.course_targets(t.course - 1)):
@@ -811,9 +751,8 @@ class BrickLayerRobotEnv(gym.Env):
         target currently passes the level/arch gate and no voussoir ring is ready either -
         every path to the rest of the wall is permanently blocked (an abandoned target, or
         a ring that failed and can never close/strike - see _abandon_ring). Distinct from
-        budget_out: without this, the only way such a state ends is burning the ENTIRE
-        remaining step budget on MOVEs/masked-cost PLACEs that can never help (confirmed:
-        exactly this pattern, hundreds of wasted steps, before the give-up path existed)."""
+        budget_out: without this, the episode can only end by burning the entire remaining
+        step budget on moves/PLACEs that can never help."""
         if not self.report.missing_targets:
             return False
         return (not self._placeable(self._matched_ids())
@@ -866,21 +805,16 @@ class BrickLayerRobotEnv(gym.Env):
         is complete. Potential-based, so it doesn't change the optimal policy -
         it only supplies the directional movement gradient PPO was missing.
 
-        Normalized by a fixed CAP, not wall length L: dividing by L made a single move worth
-        c_reach*move_step_mm/L, which SHRINKS as walls grow (confirmed: 0.33 on a 6x4 training
-        wall vs 0.125 on a 3520mm facade at c_reach=2.0) - the identical size-dependence bug
-        fixed on the observation side (see _obs's next_dx/nearest_dx). A fixed cap makes a
-        move worth the same regardless of wall size; the min(...) saturates the potential for
-        targets farther than the cap so it stays bounded (telescopes to a finite total)."""
+        Normalized by a fixed CAP, not wall length L: dividing by L makes a single move worth
+        c_reach*move_step_mm/L, which shrinks as walls grow (the same size-dependence bug fixed
+        on the observation side, see _obs's next_dx/nearest_dx). A fixed cap makes a move worth
+        the same regardless of wall size; the min(...) saturates the potential for targets
+        farther than the cap so it stays bounded (telescopes to a finite total)."""
         t = self._nearest_open()
         if t is None:
             return 0.0
         dist = min(abs(t.x - self.base_x), _REACH_SHAPING_CAP_MM)
         return -self.env_cfg.c_reach * dist / _REACH_SHAPING_CAP_MM
-
-    def _min_moves(self) -> int:
-        span = self.blueprint.length
-        return max(0, int(np.ceil(span / max(1.0, self.env_cfg.reach_mm))))
 
     # --- internals ------------------------------------------------------------
 
@@ -925,14 +859,8 @@ class BrickLayerRobotEnv(gym.Env):
         identical for a 4x3 wall or a 40-course pier (size-agnostic).
 
         Distance-to-work (next_dx / nearest_dx) is normalized by REACH, not wall length - a
-        555mm gap must read the same on a 6x4 training wall as on a 3520mm facade. Length-
-        normalizing it was the confirmed root cause of the "stops in place" failure: the
-        learned MOVE/PLACE threshold sits at a fixed fraction of whatever obs[8] reads, so on
-        any wall past ~2200mm a real, out-of-reach gap could still read BELOW that threshold
-        and get misread as "close enough to place." reach_mm/length (obs[3]) was meant to be
-        the scale cue that fixes this, but it was measurably the LEAST influential of all 22
-        inputs (a policy can't learn to rescale a threshold with a rank-22 feature) - reach-
-        normalizing the distance itself removes the need for that rescaling entirely."""
+        555mm gap must read the same on a 6x4 training wall as on a 3520mm facade, so a real
+        out-of-reach gap on a large wall can never be misread as "close enough to place."""
         bp = self.blueprint
         length = max(1.0, bp.length)
         reach = self.env_cfg.reach_mm

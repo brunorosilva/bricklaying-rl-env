@@ -3,9 +3,17 @@
     uv run python scripts/plot_curves.py runs/ --out media/
     uv run python scripts/plot_curves.py runs/ --baselines media/baselines.json
 
+    # the robot5->robot18 ladder, a curated subset of runs/robot (else EVERY run
+    # dir there - side quests, arch variants, architecture sweeps - would plot):
+    uv run python scripts/plot_curves.py runs/robot --baselines media/baselines.json \\
+        --include robot5 robot8 robot11 robot16 robot18
+
 Runs are grouped by experiment name (``<exp>_s<seed>_<time>``): each group is
-drawn as a per-seed mean with a ±1 std band. Baseline anchors (oracle / greedy
-/ random) come from a JSON file produced by ``scripts/eval_baselines.py``.
+drawn as a per-seed mean with a ±1 std band. ``--include`` keeps only groups whose
+experiment name is exactly one of the given names (omit to include every group
+found - fine for a small `runs/` dir, unwieldy for `runs/robot`, which accumulates
+one directory per experiment ever run). Baseline anchors (oracle / greedy /
+random) come from a JSON file produced by ``scripts/eval_baselines.py``.
 """
 
 from __future__ import annotations
@@ -20,8 +28,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tbparse import SummaryReader
 
-# palette: series color for the learner, muted ink for reference anchors
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]  # exp groups, fixed order
+# palette: fixed hue order, validated (dataviz skill's validate_palette.js, light+dark) for
+# up to 5 categorical series; muted ink for reference anchors. A 6th group is dropped with a
+# warning rather than silently cycling colors - see main().
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#a855f7", "#d6336c"]
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
 
 PANELS = (
@@ -49,6 +59,9 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("media"))
     parser.add_argument("--baselines", type=Path, default=None)
     parser.add_argument("--bins", type=int, default=60)
+    parser.add_argument("--include", nargs="*", default=None,
+                        help="exact experiment names to keep (default: every group found); "
+                             "plotted in the order given, not alphabetically")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -59,12 +72,24 @@ def main() -> None:
     if not groups:
         raise SystemExit(f"no runs matching '<exp>_s<seed>_<time>' under {args.runs}")
 
+    if args.include:
+        missing = [name for name in args.include if name not in groups]
+        if missing:
+            raise SystemExit(f"--include names not found under {args.runs}: {missing}")
+        ordered = [(name, groups[name]) for name in args.include]
+    else:
+        ordered = sorted(groups.items())
+    if len(ordered) > len(SERIES):
+        print(f"warning: {len(ordered)} groups > {len(SERIES)} validated colors - "
+              f"dropping {[e for e, _ in ordered[len(SERIES):]]} rather than cycling hues")
+        ordered = ordered[:len(SERIES)]
+
     anchors = json.loads(args.baselines.read_text()) if args.baselines else {}
 
     for tag, title, ylabel in PANELS:
         fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=150)
         x_max = 0.0
-        for gi, (exp, dirs) in enumerate(sorted(groups.items())):
+        for gi, (exp, dirs) in enumerate(ordered):
             per_seed = []
             for d in dirs:
                 df = SummaryReader(str(d)).scalars

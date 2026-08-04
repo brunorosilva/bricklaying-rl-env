@@ -153,11 +153,11 @@ def build_robot_policy(name: str, env):
 def _robot_ckpt_overrides(policy_name: str) -> tuple[dict, dict]:
     """(env_cfg overrides, reward_cfg overrides) the checkpoint was trained with, so replay
     reproduces both the MECHANICS (drop-height release, rail-edge fall) and the REWARD SCALE
-    (c_reach, sigma_mm/deg, collapse_penalty, c_waste) - train.ppo_robot.make_env applies all
-    of these on top of the env's own defaults, so without them replay's displayed reward/
-    return numbers are on a different scale than what training actually optimized. Older
-    checkpoints (no saved args, or missing fields) default to the pre-training-override
-    behavior rather than erroring."""
+    (sigma_mm/deg, collapse_penalty, c_waste) - train.ppo_robot.make_env applies all of these
+    on top of the env's own defaults, so without them replay's displayed reward/return numbers
+    are on a different scale than what training actually optimized. Older checkpoints (no
+    saved args, or missing fields) default to the pre-training-override behavior rather than
+    erroring."""
     if not policy_name.startswith("ckpt:"):
         return {}, {}
     try:
@@ -169,7 +169,6 @@ def _robot_ckpt_overrides(policy_name: str) -> tuple[dict, dict]:
         env_overrides = {
             "drop_control": bool(a.get("drop_control", False)),
             "fall_off_edge": bool(a.get("fall_off_edge", False)),
-            "c_reach": 2.0,  # make_env's own fixed override, not a per-run CLI arg
         }
         reward_overrides = {
             "sigma_mm": float(a.get("sigma_mm", 6.0)), "sigma_deg": float(a.get("sigma_deg", 2.0)),

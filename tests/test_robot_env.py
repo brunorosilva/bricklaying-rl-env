@@ -316,7 +316,8 @@ def test_release_height_monotone_and_endpoints():
     env.reset(seed=1, options={"spec": WallSpec(4, 3)})
     gentle = COURSE_MM * 0.5 + SPAWN_DROP_MM
     top = COURSE_MM * u.blueprint.n_courses + u.env_cfg.arm_margin_mm
-    rh = lambda b2: u._release_height(0, np.array([0.0, 0.0, b2], np.float32))
+    def rh(b2):
+        return u._release_height(0, np.array([0.0, 0.0, b2], np.float32))
     assert rh(1.0) == pytest.approx(gentle)
     assert rh(-1.0) == pytest.approx(top)
     assert rh(1.0) < rh(0.0) < rh(-1.0)
