@@ -19,6 +19,10 @@ train = ["torch>=2.3", "tensorboard>=2.16", "tyro>=0.8"]
 track = ["wandb>=0.17"]
 plot = ["matplotlib>=3.8", "tbparse>=0.0.8"]
 dev = ["pytest>=8", "ruff>=0.5"]
+# webviz/api.py's runtime deps (the optional HF Space backend behind the static frontend) -
+# a separate group from `train` since the Space image should stay small: no tensorboard/
+# wandb/matplotlib, none of which record_robot_trajectory's code path ever touches.
+serve = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 
 [build-system]
 requires = ["hatchling"]

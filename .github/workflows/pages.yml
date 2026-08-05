@@ -1,0 +1,96 @@
+name: pages
+
+# Builds the frontend as a static export and deploys it to GitHub Pages
+# (https://brunorosilva.github.io/bricklaying-rl-env/). Two things feed the build:
+#   1. scripts/export_traces.py bakes the replay matrix into frontend/public/traces/ -
+#      cached, so a push that doesn't touch anything the matrix depends on reuses it.
+#   2. NEXT_PUBLIC_API_BASE (optional) points the deployed site at a live backend - see
+#      .github/workflows/space.yml and deploy/space/README.md. Set the `HF_SPACE_URL`
+#      repository variable (Settings -> Secrets and variables -> Actions -> Variables) to
+#      enable it; leave it unset and the site still fully works off the static matrix alone.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "atrium_sim/**"
+      - "webviz/**"
+      - "train/agent.py"
+      - "baselines/**"
+      - "plans/**"
+      - "runs/**/ckpt.pt"
+      - "scripts/export_traces.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # frontend/app/build/page.tsx is deliberately un-ignored (see .gitignore) despite
+      # matching the Node-template `build/` rule - if this ever regresses, fail loudly here
+      # instead of silently shipping a site whose nav links to a 404.
+      - name: Check /build page is tracked
+        run: test -f frontend/app/build/page.tsx
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache the baked replay matrix
+        id: trace-cache
+        uses: actions/cache@v4
+        with:
+          path: frontend/public/traces
+          key: traces-${{ hashFiles('uv.lock', 'atrium_sim/**', 'webviz/**', 'train/agent.py', 'baselines/**', 'plans/**', 'runs/**/ckpt.pt', 'scripts/export_traces.py') }}
+
+      - name: Bake replay matrix (scripts/export_traces.py)
+        if: steps.trace-cache.outputs.cache-hit != 'true'
+        run: |
+          uv sync --extra train
+          uv run python scripts/export_traces.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build static export
+        working-directory: frontend
+        run: npm run build
+        env:
+          GITHUB_PAGES: "true"
+          NEXT_PUBLIC_API_BASE: ${{ vars.HF_SPACE_URL }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

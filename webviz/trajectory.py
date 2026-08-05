@@ -104,6 +104,7 @@ def record_trajectory(env, policy, seed: int | None = None, spec=None, scenario:
         "steps": steps,
         "metrics": {k: round(float(v), 4) for k, v in info["metrics"].items()},
         "seed": seed,
+        "truncated": bool(truncated),
     }
 
 
@@ -178,4 +179,5 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None, pla
         "steps": steps,
         "metrics": {k: round(float(v), 4) for k, v in metrics.items()},
         "seed": seed,
+        "truncated": bool(truncated),
     }

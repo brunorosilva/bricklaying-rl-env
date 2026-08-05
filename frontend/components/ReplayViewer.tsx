@@ -43,7 +43,13 @@ export function ReplayViewer({ replay }: { replay: Replay | null }) {
           identity must stay stable for its ResizeObserver/view-transform effect (tied to
           [replay], not [mode]) to keep working correctly if the user toggles back to 2D. */}
       <div className={mode === "3d" ? "" : "hidden"}>
-        <SceneCanvas replay={replay} tlRef={player.tlRef} curRef={player.curRef} labelsRef={player.labelsRef} />
+        <SceneCanvas
+          replay={replay}
+          tlRef={player.tlRef}
+          curRef={player.curRef}
+          labelsRef={player.labelsRef}
+          active={mode === "3d"}
+        />
       </div>
       <div className={mode === "2d" ? "" : "hidden"}>
         <StageCanvas canvasRef={player.canvasRef} />

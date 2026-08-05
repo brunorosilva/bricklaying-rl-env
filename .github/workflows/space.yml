@@ -1,0 +1,71 @@
+name: space
+
+# Mirrors the optional live backend (webviz/api.py) to a Hugging Face Space (Docker SDK) on
+# every push - see deploy/space/README.md for what the Space is for and deploy/space/
+# Dockerfile for how it's built. A no-op until both are set:
+#
+#   1. repo secret HF_TOKEN - a Hugging Face access token with write access
+#      (huggingface.co/settings/tokens), added under Settings -> Secrets and variables ->
+#      Actions -> Secrets.
+#   2. repo variable HF_SPACE_REPO - "<hf-username>/<space-name>" of a Space you've already
+#      created once (huggingface.co/new-space, SDK: Docker) - same Settings page, Variables
+#      tab.
+#
+# Only a curated subtree is pushed - atrium_sim/, webviz/, train/, baselines/, plans/,
+# runs/**/ckpt.pt (checkpoints only: no gifs, no tfevents logs), pyproject.toml, uv.lock,
+# plus deploy/space/Dockerfile and deploy/space/README.md as the pushed tree's root
+# Dockerfile/README - never this repo's own root README, and never git history (the Space
+# repo doesn't need or want either). The Space rebuilds itself on receiving the push.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "atrium_sim/**"
+      - "webviz/**"
+      - "train/**"
+      - "baselines/**"
+      - "plans/**"
+      - "runs/**/ckpt.pt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "deploy/space/**"
+      - ".github/workflows/space.yml"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: ${{ vars.HF_SPACE_REPO != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage the Space subtree
+        run: |
+          STAGE=/tmp/space-stage
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -r atrium_sim webviz train baselines plans "$STAGE/"
+          cp pyproject.toml uv.lock "$STAGE/"
+          cp deploy/space/Dockerfile "$STAGE/Dockerfile"
+          cp deploy/space/README.md "$STAGE/README.md"
+          # checkpoints only - webviz/server.py's own obs_dim filter decides at request time
+          # which ones are actually usable, so this doesn't need to duplicate that logic.
+          while IFS= read -r ckpt; do
+            mkdir -p "$STAGE/$(dirname "$ckpt")"
+            cp "$ckpt" "$STAGE/$ckpt"
+          done < <(find runs -name ckpt.pt)
+          du -sh "$STAGE"
+
+      - name: Push to the Space
+        working-directory: /tmp/space-stage
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
+        run: |
+          git init -q -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "sync from ${{ github.repository }}@${{ github.sha }}"
+          # force push: this mirror has no history worth keeping - the Space repo's git log
+          # isn't user-facing the way the main repo's is, only its current tree matters.
+          git push -f "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}" HEAD:main

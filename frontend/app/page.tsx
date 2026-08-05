@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { CaseGallery } from "@/components/CaseGallery";
 
 export default function Home() {
@@ -10,9 +11,9 @@ export default function Home() {
           against a blueprint and is scored like a real mason - every brick within BIM
           ±3&nbsp;mm tolerance, minimal waste, live physics, so a sloppy placement can topple
           the wall. Pick a case below, or{" "}
-          <a href="/build" className="text-accent hover:underline">
+          <Link href="/build" className="text-accent hover:underline">
             paint your own grid
-          </a>
+          </Link>
           .
         </p>
       </div>

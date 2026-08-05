@@ -94,15 +94,23 @@ export function useReplayPlayer(replay: Replay | null) {
   // the single animation loop, mounted once - advances curRef when playing, always redraws
   // the current frame, and writes the scrubber/frame-label via refs (not state) to avoid a
   // React re-render on every one of 60 frames/sec
+  //
+  // The playhead must advance INDEPENDENTLY of viewRef (the 2D world->pixel transform).
+  // viewRef is only set by the resize effect above, which bails on a 0x0 canvas - and the 2D
+  // canvas IS 0x0 whenever ReplayViewer is in "3d" mode, since it hides it with `display:none`
+  // rather than unmounting it. Gating this whole block on `view` used to freeze playback in
+  // 3D: Play flipped the button to "Pause" but nothing moved, the frame label stayed "-", and
+  // the reward strip never drew. `view` now guards ONLY the 2D scene draw; SceneCanvas's
+  // useFrame reads the same curRef this loop advances, so both renderers share one playhead.
   useEffect(() => {
     let raf = 0;
     let lastT = 0;
+    let lastStripStep = -1;
     const loop = (ts: number) => {
       const tl = tlRef.current;
-      const view = viewRef.current;
       const dt = lastT ? Math.min(0.1, (ts - lastT) / 1000) : 0;
       lastT = ts;
-      if (replay && view && tl.length) {
+      if (replay && tl.length) {
         if (playingRef.current) {
           curRef.current += 30 * speedRef.current * dt;
           if (curRef.current >= tl.length - 1) {
@@ -111,18 +119,32 @@ export function useReplayPlayer(replay: Replay | null) {
             setPlaying(false);
           }
         }
-        const ci = Math.min(Math.floor(curRef.current), tl.length - 1);
+        const ci = Math.min(Math.max(0, Math.floor(curRef.current)), tl.length - 1);
+
+        // --- 2D stage: only when the transform exists (i.e. the canvas is actually visible)
+        const view = viewRef.current;
         const canvas = canvasRef.current;
-        if (canvas) {
+        if (view && canvas) {
           const ctx = canvas.getContext("2d");
           const { w, h } = cssSizeRef.current;
           if (ctx && w > 0) drawScene(ctx, w, h, view, replay, tl[ci], { labels: labelsRef.current });
         }
-        const strip = stripRef.current;
-        if (strip) {
-          const ctx = strip.getContext("2d");
-          const rect = strip.getBoundingClientRect();
-          if (ctx && rect.width > 0) drawStrip(ctx, rect.width, rect.height, replay, tl[ci].st.i);
+
+        // --- renderer-agnostic chrome (no world transform): strip, scrubber, frame label.
+        // The strip only changes when the STEP changes, not every tick, so skip the redraw
+        // (and its forced layout read) otherwise - this now runs in 3D mode too, where the
+        // WebGL renderer is already competing for the main thread.
+        const st = tl[ci].st.i;
+        if (st !== lastStripStep) {
+          const strip = stripRef.current;
+          if (strip) {
+            const ctx = strip.getContext("2d");
+            const rect = strip.getBoundingClientRect();
+            if (ctx && rect.width > 0) {
+              drawStrip(ctx, rect.width, rect.height, replay, st);
+              lastStripStep = st;
+            }
+          }
         }
         if (scrubRef.current && document.activeElement !== scrubRef.current) {
           scrubRef.current.value = String(ci);

@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 type Case = {
   title: string;
@@ -6,8 +9,17 @@ type Case = {
   env: "bricklayer" | "robot";
   spec: string;
   tag?: string;
+  /** if set, the card is a button that picks a random baked seed in [0, randomSeeds) on
+   * click rather than a fixed href - see scripts/export_traces.py's `random` extras for
+   * robot18, which bakes several seeds specifically so this card is different every time
+   * without needing a live backend. */
+  randomSeeds?: number;
 };
 
+// No `policy` here - every card links to /replay without one, so the page resolves it
+// against the manifest's featured_policy (robot18 for the robot env) at load time. That
+// keeps this list from hardcoding a timestamped checkpoint dir name that will churn as
+// training continues, and keeps every card pointed at the current best policy for free.
 const CASES: Case[] = [
   {
     title: "Small wall",
@@ -24,9 +36,9 @@ const CASES: Case[] = [
   },
   {
     title: "Zero-shot generalization",
-    description: "20×10 (205 bricks) - far beyond any curriculum rung the policy trained on.",
+    description: "17×8 (140 bricks) - far beyond any curriculum rung the policy trained on.",
     env: "robot",
-    spec: "20x10",
+    spec: "17x8",
     tag: "mobile robot",
   },
   {
@@ -48,30 +60,53 @@ const CASES: Case[] = [
     description: "A random flat wall size, freshly seeded.",
     env: "robot",
     spec: "random",
+    randomSeeds: 5,
   },
 ];
 
+function CardBody({ c }: { c: Case }) {
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-medium text-ink group-hover:text-accent">{c.title}</h3>
+        {c.tag && (
+          <span className="shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted">
+            {c.tag}
+          </span>
+        )}
+      </div>
+      <p className="text-sm leading-snug text-muted">{c.description}</p>
+      <span className="mt-1 text-xs text-muted group-hover:text-accent">watch replay →</span>
+    </>
+  );
+}
+
 export function CaseGallery() {
+  const router = useRouter();
+  const cardClass =
+    "group flex flex-col gap-2 rounded-lg border border-line bg-panel p-4 text-left transition-colors hover:border-accent";
+
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {CASES.map((c) => (
-        <Link
-          key={c.title}
-          href={`/replay?env=${c.env}&spec=${encodeURIComponent(c.spec)}&policy=oracle`}
-          className="group flex flex-col gap-2 rounded-lg border border-line bg-panel p-4 transition-colors hover:border-accent"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="font-medium text-ink group-hover:text-accent">{c.title}</h3>
-            {c.tag && (
-              <span className="shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted">
-                {c.tag}
-              </span>
-            )}
-          </div>
-          <p className="text-sm leading-snug text-muted">{c.description}</p>
-          <span className="mt-1 text-xs text-muted group-hover:text-accent">watch replay →</span>
-        </Link>
-      ))}
+      {CASES.map((c) => {
+        const href = `/replay?env=${c.env}&spec=${encodeURIComponent(c.spec)}`;
+        if (c.randomSeeds) {
+          return (
+            <button
+              key={c.title}
+              onClick={() => router.push(`${href}&seed=${Math.floor(Math.random() * c.randomSeeds!)}`)}
+              className={cardClass}
+            >
+              <CardBody c={c} />
+            </button>
+          );
+        }
+        return (
+          <Link key={c.title} href={href} className={cardClass}>
+            <CardBody c={c} />
+          </Link>
+        );
+      })}
     </div>
   );
 }

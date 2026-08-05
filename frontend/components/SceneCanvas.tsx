@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { RefObject } from "react";
@@ -26,8 +26,16 @@ const VOUSSOIR_COLOR = new THREE.Color(PALETTE.voussoirFace);
  * real 3D solids (a wall you can orbit, not a flat sprite), with lighting/shadows so
  * depth actually reads. Data contract is identical to the 2D canvas renderer - this is a
  * rendering-layer swap, not a new episode format; see draw.ts for the 2D counterpart and
- * lib/replay/shared.ts for the palette/color math both share. */
-export function SceneCanvas({ replay, tlRef, curRef, labelsRef }: { replay: Replay | null } & PlayerRefs) {
+ * lib/replay/shared.ts for the palette/color math both share.
+ *
+ * `active` is false while the 2D stage is the visible one (ReplayViewer hides this with
+ * `display:none` rather than unmounting it, so the R3F root - and its useFrame loops - would
+ * otherwise keep rendering an invisible canvas at 60fps). Passed straight through as the
+ * Canvas frameloop mode: "always" while visible, "never" while hidden. Don't use "demand" -
+ * that needs explicit invalidate() calls this scene never makes. */
+export function SceneCanvas({
+  replay, tlRef, curRef, labelsRef, active = true,
+}: { replay: Replay | null; active?: boolean } & PlayerRefs) {
   const cam = useMemo(
     () => defaultCameraPosition(replay?.length ?? 3000, replay?.n_courses ?? 6),
     [replay?.length, replay?.n_courses],
@@ -37,6 +45,7 @@ export function SceneCanvas({ replay, tlRef, curRef, labelsRef }: { replay: Repl
     <div className="relative h-[60vh] min-h-[360px] w-full overflow-hidden rounded-md md:h-[65vh]">
       <Canvas
         shadows
+        frameloop={active ? "always" : "never"}
         camera={{ position: cam.position, fov: 42, near: 10, far: 40000 }}
         className="!absolute inset-0"
       >
@@ -58,15 +67,38 @@ export function SceneCanvas({ replay, tlRef, curRef, labelsRef }: { replay: Repl
         <Ground length={replay?.length ?? 3000} />
         {replay && <SceneContents replay={replay} tlRef={tlRef} curRef={curRef} labelsRef={labelsRef} />}
         <OrbitControls
-          target={cam.target}
+          makeDefault
           maxPolarAngle={Math.PI / 2 - 0.01}
           minDistance={200}
           maxDistance={8000}
         />
+        <CameraRig cam={cam} />
       </Canvas>
-      <SceneHud replay={replay} tlRef={tlRef} curRef={curRef} />
+      <SceneHud replay={replay} tlRef={tlRef} curRef={curRef} active={active} />
     </div>
   );
+}
+
+/** Re-applies the camera position/target whenever `cam` changes (new replay -> new wall
+ * length/course count -> different framing). R3F's <Canvas camera={...}> prop only takes
+ * effect on the FIRST configure - after that, drei's OrbitControls owns the camera and the
+ * prop is silently ignored, so switching specs (e.g. a 4x4 wall -> a 40-module facade)
+ * left the eye position stale while only the OrbitControls target moved, framing the new
+ * wall wrong. Doing it here (inside the Canvas, once per `cam` change) fixes that without
+ * remounting the Canvas - a `key` remount would drop the WebGL context on every switch. */
+function CameraRig({ cam }: { cam: { position: [number, number, number]; target: [number, number, number] } }) {
+  const camera = useThree((s) => s.camera);
+  const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update(): void } | null;
+  useEffect(() => {
+    camera.position.set(...cam.position);
+    if (controls) {
+      controls.target.set(...cam.target);
+      controls.update();
+    } else {
+      camera.lookAt(...cam.target);
+    }
+  }, [cam, camera, controls]);
+  return null;
 }
 
 function Ground({ length }: { length: number }) {
@@ -80,14 +112,18 @@ function Ground({ length }: { length: number }) {
 }
 
 /** A small HTML overlay (not WebGL text) for the HUD strip - matches the 2D renderer's HUD
- * bar, updated imperatively via refs so it doesn't fight the canvas for 30fps re-renders. */
-function SceneHud({ replay, tlRef, curRef }: { replay: Replay | null } & Pick<PlayerRefs, "tlRef" | "curRef">) {
+ * bar, updated imperatively via refs so it doesn't fight the canvas for 30fps re-renders.
+ * Runs its own rAF (independent of the Canvas's frameloop, which `active` also gates) - kept
+ * cheap enough that it just early-returns rather than being torn down while inactive. */
+function SceneHud({
+  replay, tlRef, curRef, active = true,
+}: { replay: Replay | null; active?: boolean } & Pick<PlayerRefs, "tlRef" | "curRef">) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let raf = 0;
     const tick = () => {
       const tl = tlRef.current;
-      if (replay && ref.current && tl.length) {
+      if (active && replay && ref.current && tl.length) {
         const ci = Math.min(Math.max(0, Math.floor(curRef.current)), tl.length - 1);
         const st = tl[ci].st;
         const isRobot = !!replay.robot;
@@ -102,7 +138,7 @@ function SceneHud({ replay, tlRef, curRef }: { replay: Replay | null } & Pick<Pl
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [replay, tlRef, curRef]);
+  }, [replay, tlRef, curRef, active]);
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 flex h-8 items-center gap-3 bg-hudBg/90 px-3 font-mono text-[12px]" style={{ background: PALETTE.hudBg + "e6" }}>

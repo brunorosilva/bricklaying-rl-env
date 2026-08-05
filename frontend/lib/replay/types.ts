@@ -56,6 +56,7 @@ export type Replay = {
   steps: Step[];
   metrics: Metrics;
   seed: number | null;
+  truncated?: boolean;
   _policy?: string;
   robot?: { reach: number };
   hard_bodies?: HardBody[];
