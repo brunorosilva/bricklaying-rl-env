@@ -19,18 +19,24 @@ render = ["pygame-ce>=2.5", "imageio>=2.34"]
 # inference path (train/agent.py, train/architectures.py, webviz/server.py's
 # build_robot_policy, scripts/export_traces.py) imports numpy/torch only - tensorboard/tyro
 # are function-local imports in train/ppo*.py, which this path never touches. Split out so
-# deploy/space/Dockerfile and .github/workflows/pages.yml's trace bake can install exactly
-# this instead of dragging in the training-loop deps.
+# .github/workflows/space.yml's requirements.txt generation and .github/workflows/
+# pages.yml's trace bake can install exactly this instead of dragging in the
+# training-loop deps.
 infer = ["torch>=2.3"]
 train = ["torch>=2.3", "tensorboard>=2.16", "tyro>=0.8"]
 track = ["wandb>=0.17"]
 plot = ["matplotlib>=3.8", "tbparse>=0.0.8"]
 dev = ["pytest>=8", "ruff>=0.5"]
 # webviz/api.py's runtime deps (the optional HF Space backend behind the static frontend) -
-# a separate group from `train`/`infer` since the Space image should stay small: no
-# tensorboard/wandb/matplotlib, none of which record_robot_trajectory's code path ever
-# touches. The Space installs `serve` + `infer` together.
-serve = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+# a separate group from `train`/`infer` since the Space's dependency set should stay small:
+# no tensorboard/wandb/matplotlib, none of which record_robot_trajectory's code path ever
+# touches. The Space installs `serve` + `infer` together. `gradio` is here (not its own
+# extra) because it's only ever needed alongside fastapi/uvicorn - deploy/space/app.py
+# mounts webviz.api's FastAPI app inside a minimal gr.Blocks via gradio.mount_gradio_app,
+# which is what makes the Space SDK-detected as "gradio" rather than "docker" - Docker-SDK
+# Space creation now requires HF PRO (a policy change as of ~July 2026), while Gradio-SDK
+# Spaces on ZeroGPU hardware remain free to create.
+serve = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "gradio>=5.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -1,21 +1,28 @@
 name: space
 
-# Mirrors the optional live backend (webviz/api.py) to a Hugging Face Space (Docker SDK) on
-# every push - see deploy/space/README.md for what the Space is for and deploy/space/
-# Dockerfile for how it's built. A no-op until both are set:
+# Mirrors the optional live backend (webviz/api.py) to a Hugging Face Space (Gradio SDK,
+# on ZeroGPU hardware - free to create; Docker-SDK Spaces now require HF PRO, see
+# deploy/space/README.md) on every push. A no-op until both are set:
 #
 #   1. repo secret HF_TOKEN - a Hugging Face access token with write access
 #      (huggingface.co/settings/tokens), added under Settings -> Secrets and variables ->
 #      Actions -> Secrets.
 #   2. repo variable HF_SPACE_REPO - "<hf-username>/<space-name>" of a Space you've already
-#      created once (huggingface.co/new-space, SDK: Docker) - same Settings page, Variables
-#      tab.
+#      created once (SDK: Gradio, hardware: ZeroGPU) - same Settings page, Variables tab.
 #
 # Only a curated subtree is pushed - atrium_sim/, webviz/, train/, baselines/, plans/,
-# runs/**/ckpt.pt (checkpoints only: no gifs, no tfevents logs), pyproject.toml, uv.lock,
-# plus deploy/space/Dockerfile and deploy/space/README.md as the pushed tree's root
-# Dockerfile/README - never this repo's own root README, and never git history (the Space
-# repo doesn't need or want either). The Space rebuilds itself on receiving the push.
+# runs/**/ckpt.pt (checkpoints only: no gifs, no tfevents logs), deploy/space/app.py (as
+# app.py), deploy/space/requirements.txt (as requirements.txt), and deploy/space/README.md
+# (as README.md) - never this repo's own root README/pyproject.toml/uv.lock (the Space
+# doesn't run uv or read them - see requirements.txt's own comment on why its pins are
+# deliberately loose rather than uv.lock-exact), and never git history (the Space repo
+# doesn't need or want either).
+#
+# Pushed via huggingface_hub's upload_folder (HTTP API), not `git push`: HF's git remote
+# now rejects any binary file committed as a plain blob (it wants git-xet, which isn't
+# installed on this runner), while upload_folder handles that storage-backend negotiation
+# itself. delete_patterns=["*"] makes each sync a full replace of the Space's tree, mirroring
+# what a force-push would have done - this mirror has no history worth keeping.
 on:
   push:
     branches: [main]
@@ -26,8 +33,6 @@ on:
       - "baselines/**"
       - "plans/**"
       - "runs/**/ckpt.pt"
-      - "pyproject.toml"
-      - "uv.lock"
       - "deploy/space/**"
       - ".github/workflows/space.yml"
   workflow_dispatch:
@@ -44,8 +49,8 @@ jobs:
           STAGE=/tmp/space-stage
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -r atrium_sim webviz train baselines plans "$STAGE/"
-          cp pyproject.toml uv.lock "$STAGE/"
-          cp deploy/space/Dockerfile "$STAGE/Dockerfile"
+          cp deploy/space/app.py "$STAGE/app.py"
+          cp deploy/space/requirements.txt "$STAGE/requirements.txt"
           cp deploy/space/README.md "$STAGE/README.md"
           # checkpoints only - webviz/server.py's own obs_dim filter decides at request time
           # which ones are actually usable, so this doesn't need to duplicate that logic.
@@ -56,7 +61,6 @@ jobs:
           du -sh "$STAGE"
 
       - name: Push to the Space
-        working-directory: /tmp/space-stage
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
@@ -67,11 +71,17 @@ jobs:
                  "access to spaces/$HF_SPACE_REPO)."
             exit 1
           fi
-          git init -q -b main
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -q -m "sync from ${{ github.repository }}@${{ github.sha }}"
-          # force push: this mirror has no history worth keeping - the Space repo's git log
-          # isn't user-facing the way the main repo's is, only its current tree matters.
-          git push -f "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}" HEAD:main
+          pip install --quiet huggingface_hub
+          python3 -c "
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          info = api.upload_folder(
+              repo_id=os.environ['HF_SPACE_REPO'],
+              repo_type='space',
+              folder_path='/tmp/space-stage',
+              commit_message='sync from ${{ github.repository }}@${{ github.sha }}',
+              delete_patterns=['*'],
+          )
+          print('pushed:', info.commit_url)
+          "

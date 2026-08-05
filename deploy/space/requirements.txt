@@ -1,0 +1,19 @@
+# Deliberately loose (not the exact pins uv.lock would produce): HF's Gradio-SDK/ZeroGPU
+# build image runs its own Python version (observed: 3.10, older than this project's own
+# >=3.11 floor) and force-installs its own torch/gradio/spaces versions alongside whatever
+# is listed here - an exact-pinned transitive closure resolved against a different Python
+# (e.g. networkx==3.6.1, which has no Python-3.10-compatible release) fails outright. Not a
+# reproducibility regression: unlike the CI trace bake (scripts/export_traces.py, which
+# pins via uv.lock and is what atrium_sim/physics.py's determinism guarantee actually
+# depends on), everything this Space runs is already labeled "live" in the frontend, not
+# the canonical baked matrix - so pip picking whatever compatible versions resolve here is
+# fine. torch and spaces (the ZeroGPU @spaces.GPU decorator package - see app.py) are
+# deliberately NOT listed here - HF's build appends its own version-pinned constraints for
+# both automatically on every Gradio-SDK/ZeroGPU Space; adding competing pins here risks a
+# version conflict against platform-specific requirements neither of us controls.
+gymnasium>=1.1,<2
+pymunk>=6.9,<7
+numpy>=1.26
+fastapi>=0.115
+uvicorn[standard]>=0.30
+gradio>=5.0

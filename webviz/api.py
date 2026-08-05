@@ -1,17 +1,28 @@
 """FastAPI wrapper around webviz/server.py - the OPTIONAL live backend behind the static
-frontend. Deployed as a Hugging Face Space (Docker SDK); see deploy/space/README.md for the
-one-time setup and .github/workflows/space.yml for how it auto-updates on push.
+frontend. Deployed as a Hugging Face Space (Gradio SDK, on ZeroGPU hardware - see
+deploy/space/app.py for how this app is mounted inside a minimal gr.Blocks, and
+deploy/space/README.md for the one-time setup); .github/workflows/space.yml pushes updates
+on every push.
 
 Not required for the site to work: everything linked from the home page is precomputed by
 scripts/export_traces.py and served as flat files. This exists only for what a static export
 can't cover - an arbitrary seed/policy/spec combo, and the /build grid editor, whose plans
 are drawn on the fly and can't be baked in advance.
 
-    uv sync --extra serve --extra train
+    uv sync --extra serve --extra infer
     uv run uvicorn webviz.api:app --host 0.0.0.0 --port 7860
 
-CORS is locked to the deployed frontend's origin (ALLOWED_ORIGINS below), not left open to
-arbitrary sites - each request runs a real (if CPU-cheap, seconds-to-a-minute) episode.
+CORS is locked to the deployed frontend's origin (ALLOWED_ORIGINS below) at the application
+level - this is real and effective when running standalone (`uvicorn webviz.api:app`, e.g.
+a future Docker-SDK deployment). It has no browser-enforced effect on the actual Gradio-SDK
+Space deployment: confirmed HF's own edge unconditionally adds
+`Access-Control-Allow-Origin: <the request's Origin>` to every response from a public
+`*.hf.space` domain, for any path and regardless of what the application decided - Spaces
+are meant to be callable/embeddable from anywhere, by platform design. Accepted as a
+low-severity gap (see deploy/space/app.py's `_merge_api_routes` docstring): there's no
+sensitive data here, and the protections that actually matter for abuse - the policy/spec
+whitelist below, the plan-size clamp, the concurrency semaphore - are all still fully
+effective regardless of what the edge does with CORS headers.
 """
 
 from __future__ import annotations
