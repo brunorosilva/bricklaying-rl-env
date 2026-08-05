@@ -69,6 +69,10 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+infer = [
+    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
 plot = [
     { name = "matplotlib" },
     { name = "tbparse" },
@@ -104,12 +108,13 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "tbparse", marker = "extra == 'plot'", specifier = ">=0.0.8" },
     { name = "tensorboard", marker = "extra == 'train'", specifier = ">=2.16" },
+    { name = "torch", marker = "extra == 'infer'", specifier = ">=2.3", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.3", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tyro", marker = "extra == 'train'", specifier = ">=0.8" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.30" },
     { name = "wandb", marker = "extra == 'track'", specifier = ">=0.17" },
 ]
-provides-extras = ["render", "train", "track", "plot", "dev", "serve"]
+provides-extras = ["render", "infer", "train", "track", "plot", "dev", "serve"]
 
 [[package]]
 name = "certifi"

@@ -61,6 +61,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
         run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_SPACE_REPO is set but the HF_TOKEN secret is empty. Add it under" \
+                 "Settings -> Secrets and variables -> Actions -> Secrets (a token with write" \
+                 "access to spaces/$HF_SPACE_REPO)."
+            exit 1
+          fi
           git init -q -b main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

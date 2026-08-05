@@ -60,7 +60,7 @@ jobs:
       - name: Bake replay matrix (scripts/export_traces.py)
         if: steps.trace-cache.outputs.cache-hit != 'true'
         run: |
-          uv sync --extra train
+          uv sync --extra infer
           uv run python scripts/export_traces.py
 
       - uses: actions/setup-node@v4

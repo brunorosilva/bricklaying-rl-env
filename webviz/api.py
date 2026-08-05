@@ -55,17 +55,18 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # forward pass per step, seconds to ~a minute for a full facade - and the handlers below are
 # plain `def`s (not `async def`s) specifically so FastAPI/Starlette runs them in its
 # threadpool instead of stalling the event loop; this semaphore then caps how many of that
-# threadpool's workers can be doing episode work at once. Free-tier Space CPUs have very
-# little to share - a handful of concurrent visitors would otherwise pin every core.
+# threadpool's workers can be doing episode work at once. CPU Basic (the Space's hardware
+# tier) has 2 vCPU to share - a handful of concurrent visitors would otherwise pin both.
 _episode_slot = threading.Semaphore(1)
 
 
 @app.on_event("startup")
 def _warm_caches() -> None:
-    """list_robot_checkpoints()/list_checkpoints() torch.load every candidate checkpoint the
-    FIRST time either is called (see webviz/server.py's own docstring on why that's cached
-    by mtime rather than skipped) - pay that cost once here, at boot, instead of making
-    whichever visitor's request happens to land first eat it."""
+    """list_robot_checkpoints() torch.loads every candidate checkpoint the first time it's
+    called and memoizes the result by (path, mtime) - see webviz/server.py's own docstring
+    on why that's cached rather than skipped. Pay that once here, at boot, instead of making
+    whichever visitor's request lands first eat it. list_checkpoints() is a plain glob and
+    costs nothing; it's called alongside only because /policies needs both."""
     list_robot_checkpoints()
     list_checkpoints()
 
@@ -89,6 +90,47 @@ def _valid_bricklayer_policies() -> set[str]:
 
 def _valid_specs(env: str) -> set[str]:
     return (set(SPECS) | set(list_house_plans())) if env == "robot" else set(SPECS)
+
+
+# The /build grid editor caps its own inputs (2-40 modules and courses, ring depth <= 6 -
+# see frontend/components/GridEditor.tsx), but that's client-side on an endpoint that's open
+# on the public internet, and FacadePlan.validate() only checks in-grid/no-overlap, never
+# SIZE. Without a server-side ceiling, {"plan": {"grid_cols": 5000, "grid_rows": 5000}}
+# tiles millions of modules, gets a proportionally enormous step budget (robot_env.py's
+# self.budget), accumulates a pose snapshot per physics tick in RAM, and holds
+# _episode_slot for the whole ride - one request wedges the Space for every visitor until
+# the container OOMs. Same ceilings as the editor, enforced here where they can't be
+# bypassed.
+MAX_GRID = 40
+MAX_OPENINGS = 24
+MAX_RING_COURSES = 6
+MAX_PANELS = 2 * MAX_GRID * MAX_GRID  # validate()'s overlap check is O(n^2) over panels
+
+
+def _plan_rejection(plan: dict) -> str | None:
+    """None if the plan is within the editor's own limits, else why it isn't."""
+    try:
+        cols, rows = int(plan["grid_cols"]), int(plan["grid_rows"])
+    except (KeyError, TypeError, ValueError):
+        return "plan needs integer grid_cols/grid_rows"
+    if not (1 <= cols <= MAX_GRID and 1 <= rows <= MAX_GRID):
+        return f"grid must be 1x1..{MAX_GRID}x{MAX_GRID} (got {cols}x{rows})"
+    openings = plan.get("openings") or []
+    if not isinstance(openings, list) or len(openings) > MAX_OPENINGS:
+        return f"at most {MAX_OPENINGS} openings"
+    for o in openings:
+        if not isinstance(o, dict):
+            return "each opening must be an object"
+        try:
+            ring = int(o.get("arch_ring_courses") or 1)
+        except (TypeError, ValueError):
+            return "arch_ring_courses must be an integer"
+        if ring > MAX_RING_COURSES:
+            return f"arch_ring_courses must be <= {MAX_RING_COURSES}"
+    panels = plan.get("panels") or []
+    if not isinstance(panels, list) or len(panels) > MAX_PANELS:
+        return f"at most {MAX_PANELS} panels"
+    return None
 
 
 @app.get("/")
@@ -120,6 +162,8 @@ def episode(req: EpisodeRequest):
             return {"error": "custom plans are robot-env only"}
         if req.policy not in _valid_robot_policies():
             return {"error": f"unknown policy: {req.policy!r}"}
+        if (why := _plan_rejection(req.plan)) is not None:
+            return {"error": why}
     else:
         valid_policies = _valid_robot_policies() if req.env == "robot" else _valid_bricklayer_policies()
         if req.policy not in valid_policies:

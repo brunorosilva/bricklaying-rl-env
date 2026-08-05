@@ -5,6 +5,9 @@ colorFrom: orange
 colorTo: gray
 sdk: docker
 app_port: 7860
+pinned: false
+license: mit
+short_description: Live backend for the bricklaying-RL frontend - runs one episode per request
 ---
 
 # atrium-sim webviz API
@@ -39,7 +42,17 @@ pushed by `.github/workflows/space.yml` on every push to `main` (only what
 `README.md` and `deploy/space/Dockerfile` as its `Dockerfile`). See that workflow for the
 one-time setup (`HF_TOKEN` + `HF_SPACE_REPO` repo secrets/variables).
 
-Free-tier Spaces sleep after inactivity; the first request after a while can take ~30-60s
-to wake. The frontend's live-fallback path (`frontend/lib/traces.ts`) accounts for this -
-a cold Space returns an HTML "starting" page rather than JSON, which is checked for
-explicitly instead of surfacing a raw parse error.
+Creating a Docker Space requires a paid plan - PRO for a personal account, Team or
+Enterprise for an organization; Static Spaces are the only free-to-create kind. The
+hardware itself is cheap: CPU Basic (2 vCPU / 16GB RAM / 50GB non-persistent disk) carries
+no hourly charge once you have the plan. On CPU Basic a Space sleeps after 48h with no
+traffic and that timer isn't configurable at this tier - the first request afterwards
+wakes the container, which takes ~30-60s. The frontend's live-fallback path
+(`frontend/lib/traces.ts`) accounts for both halves of that: a waking Space answers with
+HF's own HTML page rather than JSON, which is checked for explicitly, and the request
+carries a timeout so a Space that isn't answering at all surfaces the same "try again
+shortly" message instead of hanging the UI.
+
+`EXTRA_ALLOWED_ORIGIN` (read at `webviz/api.py`'s `ALLOWED_ORIGINS`) can be set as a
+runtime **Variable** in the Space's own Settings (not a GitHub variable) if you ever need
+to allow a second origin - e.g. testing against a custom domain.

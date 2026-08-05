@@ -90,38 +90,68 @@ export async function loadTrace(meta: TraceMeta): Promise<Replay> {
 
 export type LivePolicies = { policies: string[]; specs: string[]; scenarios: string[] };
 
+/** How long to wait on the live backend before giving up. A cold HF Space on CPU Basic
+ * needs ~30-60s to wake (container restart plus webviz/api.py's startup checkpoint
+ * warm-up), and a full facade/house episode is real CPU work on top of that, plus
+ * webviz/api.py serializes episodes behind a Semaphore(1) - a request can be queued behind
+ * another visitor's. Past this the Space is wedged rather than slow, and hanging the button
+ * forever is worse than saying so. */
+const LIVE_EPISODE_TIMEOUT_MS = 120_000;
+/** GET /policies is a cheap lookup against caches api.py warmed at boot - if it can't
+ * answer quickly the Space is asleep, and /build's caller already falls back to the
+ * oracle/random default. */
+const LIVE_POLICIES_TIMEOUT_MS = 10_000;
+
+const ASLEEP_MESSAGE = "the live backend looks like it's asleep or starting up - try again in ~30s";
+
 export async function fetchLivePolicies(env: string): Promise<LivePolicies | null> {
   if (!LIVE_API_BASE) return null;
   try {
-    const res = await fetch(`${LIVE_API_BASE}/policies?env=${encodeURIComponent(env)}`);
+    const res = await fetch(`${LIVE_API_BASE}/policies?env=${encodeURIComponent(env)}`, {
+      signal: AbortSignal.timeout(LIVE_POLICIES_TIMEOUT_MS),
+    });
     if (!res.ok) return null;
     return (await res.json()) as LivePolicies;
   } catch {
-    return null;
+    return null; // includes the timeout - a sleeping Space is indistinguishable from a down one
   }
 }
 
 /** Runs a fresh episode on the live backend (an HF Space, when configured) - for anything
- * the static matrix doesn't cover: an arbitrary seed, or a /build grid-editor plan. Free-tier
- * Spaces sleep after inactivity, so a cold one returns an HTML "waking up" page rather than
- * JSON; that's checked explicitly instead of blindly calling res.json() and surfacing a
- * cryptic "Unexpected token '<'" to the user. */
+ * the static matrix doesn't cover: an arbitrary seed, or a /build grid-editor plan. A Space
+ * on CPU Basic sleeps after 48h idle, so a waking one answers with HF's own HTML page
+ * instead of JSON (checked explicitly, rather than blindly calling res.json() and
+ * surfacing a cryptic "Unexpected token '<'"), and a Space that isn't answering at all is
+ * caught by the timeout instead of hanging the button forever. */
 export async function runLiveEpisode(body: Record<string, unknown>): Promise<Replay> {
   if (!LIVE_API_BASE) throw new Error("no live backend is configured for this deployment");
-  const res = await fetch(`${LIVE_API_BASE}/episode`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const contentType = res.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    throw new Error(
-      res.status === 503 || !res.ok
-        ? "the live backend looks like it's asleep or starting up - try again in ~30s"
-        : "the live backend returned something unexpected",
-    );
+  let res: Response;
+  try {
+    res = await fetch(`${LIVE_API_BASE}/episode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(LIVE_EPISODE_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // AbortSignal.timeout rejects with a DOMException named "TimeoutError"; anything else
+    // is a network/DNS/CORS failure. Both look identical to a visitor - nothing came back -
+    // and on this deployment a sleeping Space is by far the likeliest cause of either.
+    if ((e as Error)?.name === "TimeoutError") throw new Error(ASLEEP_MESSAGE);
+    throw new Error(`couldn't reach the live backend: ${(e as Error)?.message ?? "network error"}`);
   }
-  const d = await res.json();
-  if (d.error) throw new Error(d.error);
-  return d as Replay;
+  // This API answers JSON and only JSON, so a non-JSON body is HF's own building/sleeping/
+  // error page - which it serves with a 200 as readily as a 503, hence no status check here.
+  if (!(res.headers.get("content-type") || "").includes("application/json")) {
+    throw new Error(ASLEEP_MESSAGE);
+  }
+  const d = (await res.json()) as Record<string, unknown>;
+  if (d.error) throw new Error(String(d.error));
+  // FastAPI answers a request-validation failure with 422 + {"detail": [...]} - JSON, but
+  // not a replay and not our own {"error": ...} shape. Catch it here instead of letting the
+  // caller die on r.steps.length.
+  if (!Array.isArray(d.steps)) {
+    throw new Error(`unexpected response from the live backend: ${JSON.stringify(d).slice(0, 160)}`);
+  }
+  return d as unknown as Replay;
 }
