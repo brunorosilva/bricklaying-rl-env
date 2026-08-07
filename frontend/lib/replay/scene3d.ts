@@ -6,6 +6,7 @@
 import * as THREE from "three";
 
 export const BRICK_DEPTH_MM = 100; // a real brick's depth - the wall's "into the screen" extent
+export const PERSPECTIVE_FOV_DEG = 42; // vertical FOV - matches the camera's old fixed fov
 
 let sharedUnitBox: THREE.BoxGeometry | null = null;
 
@@ -39,17 +40,50 @@ export function extrudedPolygon(points: [number, number][], depth: number = BRIC
 
 /** Default camera framing for a wall of the given length/height - a three-quarter
  * architectural-rendering angle, close enough to be legible, far enough to see the whole
- * build; OrbitControls take it from here. */
-export function defaultCameraPosition(lengthMm: number, nCoursesOrHeightMm: number, isHeightMm = false): {
+ * build. Aspect-aware: a 16x16 facade in a wide container needs a very different pull-back
+ * distance than the same facade in a narrow one, so the distance is derived from the live
+ * canvas aspect + the camera's own (vertical) FOV, not a fixed heuristic that assumed some
+ * average aspect ratio. OrbitControls take it from here after the initial frame. */
+export function defaultCameraPosition(
+  lengthMm: number, nCoursesOrHeightMm: number, aspect: number = 16 / 9, isHeightMm = false,
+  centerXMm?: number,
+): {
   position: [number, number, number];
   target: [number, number, number];
 } {
   const heightMm = isHeightMm ? nCoursesOrHeightMm : nCoursesOrHeightMm * 60;
-  const cx = lengthMm / 2;
+  // centerXMm lets a caller frame a SUB-region (e.g. the Strike page cropping in on one
+  // arch's opening) without moving or resizing anything actually rendered - only the camera
+  // changes; `lengthMm` still controls the fitted SPAN in that case, not the true wall length.
+  const cx = centerXMm ?? lengthMm / 2;
   const cy = heightMm / 2;
-  const span = Math.max(lengthMm, heightMm * 2, 800);
+  const vFov = (PERSPECTIVE_FOV_DEG * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+  const margin = 1.2; // headroom so the wall doesn't touch the frame edges
+  // distance needed to fit the whole length horizontally, and the whole height vertically -
+  // the three-quarter angle foreshortens length a little, which `margin` covers rather than
+  // a precise projection (OrbitControls lets a visitor correct the last few percent anyway).
+  const distForWidth = (lengthMm * margin) / 2 / Math.tan(hFov / 2);
+  const distForHeight = (heightMm * margin) / 2 / Math.tan(vFov / 2);
+  const dist = Math.max(distForWidth, distForHeight, 800);
   return {
-    position: [cx - span * 0.15, heightMm * 0.75 + span * 0.35, span * 0.9],
+    position: [cx - dist * 0.18, heightMm * 0.7 + dist * 0.28, dist * 0.92],
     target: [cx, cy * 0.6, 0],
   };
+}
+
+/** Frustum for the "drawing" mode's orthographic elevation camera - the honest
+ * architectural view (a true elevation, dead-on, not a 3/4 render), sized to fit the wall
+ * plus a margin at the given aspect. Position the camera on +Z looking at -Z (see
+ * SceneCanvas's DrawingCamera) and these become its left/right/top/bottom frustum planes. */
+export function orthographicFraming(
+  lengthMm: number, heightMm: number, aspect: number, marginMm = 400,
+): { left: number; right: number; top: number; bottom: number } {
+  const worldW = lengthMm + marginMm * 2;
+  const worldH = heightMm + marginMm * 2;
+  let halfW = worldW / 2;
+  let halfH = worldH / 2;
+  if (halfW / halfH > aspect) halfH = halfW / aspect;
+  else halfW = halfH * aspect;
+  return { left: -halfW, right: halfW, top: halfH, bottom: -halfH };
 }

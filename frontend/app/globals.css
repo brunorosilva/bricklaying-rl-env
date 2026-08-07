@@ -1,37 +1,31 @@
 @import "tailwindcss";
 
-/* Theme tokens lifted directly from atrium_sim/render/renderer.py's palette (BG, GROUND,
-   GHOST, NEXT_SLOT, MORTAR, TERRACOTTA, STRAY, ROBOT, STONE, ...) - the browser replay and
-   the server-rendered GIFs should look like the same product, not two skins of one idea.
+/* Theme tokens mirrored from frontend/lib/replay/shared.ts's SUBSTRATE/MATERIAL/INTENT
+   groups (itself mirrored into atrium_sim/render/palette.py) - the browser replay and the
+   server-rendered GIFs should look like the same product, not two skins of one idea.
    Deliberately dark-only: the replay stage is a canvas of bricks/mortar/ground that the
    renderer itself only ever draws on a dark ground - a light variant would fight the
-   content, not the chrome, so this commits to one polished theme instead of a half one. */
-@theme {
-  --color-bg: #181a20;
-  --color-panel: #1e212a;
-  --color-panel-2: #262a35;
-  --color-line: #323847;
-  --color-ink: #e7e8ec;
-  --color-muted: #9aa0ac;
-  --color-accent: #f0c850;
-  --color-good: #5fb45a;
-  --color-bad: #d64b45;
-  --color-stage-bg: #181a20;
-  --color-ground: #46484e;
-  --color-ghost: #6e737d;
-  --color-mortar: #69645f;
-  --color-terracotta: #b25c3e;
-  --color-stray: #5a2d28;
-  --color-robot: #5aaadc;
-  --color-robot-dark: #3c78a5;
-  --color-stone: #b2aca0;
-  --color-stone-edge: #6e6c68;
-  --color-cement: #96948f;
-  --color-centering: #785f3c;
+   content, not the chrome, so this commits to one polished theme instead of a half one.
 
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+   Only tokens actually consumed as Tailwind classes (bg-*, text-*, border-*, ...) live here;
+   the renderers' own material/measurement colors stay in shared.ts's PALETTE, since they're
+   applied imperatively (canvas fillStyle, three.js Color), never as a class name. */
+@theme {
+  --color-bg: #0f0e0d;
+  --color-panel: #1c1a18;
+  --color-panel-2: #242220;
+  --color-line: #332f2b;
+  --color-line-strong: #4a443e;
+  --color-ink: #ede9e3;
+  --color-muted: #9a938a;
+  --color-faint: #6b655d;
+  --color-accent: #f2b94b;
+  --color-accent-ink: #201603; /* text on a solid accent background - needs real contrast */
+  --color-good: #6fa9ac;
+  --color-bad: #c24a3f;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 html,

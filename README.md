@@ -1,8 +1,8 @@
-# atrium-sim
+# Monumental.copy
 
 **A physics-based bricklaying robot, and the reward function that taught it to build.**
 
-`atrium-sim` is a Gymnasium + PyMunk environment where a mobile robot lays a running-bond
+`Monumental.copy` is a Gymnasium + PyMunk environment where a mobile robot lays a running-bond
 brick wall to real construction tolerances — every brick within **BIM ±3mm**, judged by
 live rigid-body physics, so a careless placement can topple the wall. This README is the
 build log of that robot: what its reward function had to encode, which pieces of it were
@@ -367,6 +367,41 @@ close. Ring closure on this facade is 100% across all three arches; strike survi
 zero rise, no arch action to redistribute load) fails every time. That specific,
 reproducible gap is the subject of the architecture bake-off below.
 
+### Does the flat-wall ladder actually predict this?
+
+Every number above is `robot18`. A harder question: does "The ladder" section's flat-wall
+progression transfer to a real, structurally different project at all, or does `uk_terrace`
+measure something else entirely? Checking this meant retraining the ladder — its historical
+checkpoints predate the current 28-dimension, mask-aware observation and can't even be
+*loaded* into today's env. Retraining also collapsed a step: `robot5`/`robot7`/`robot8`'s
+distinguishing bugs (a diagonal build order, a learned-not-dictated brick kind) are now
+permanent, unconditional fixes in the env code, not flags — so under today's code all three
+recipes are the same recipe, and retraining them separately would just be three copies of
+one run. They collapse into a single checkpoint, `robot8_v2`. `robot11_v2` and `robot16_v2`
+keep their real distinguishing hyperparameters (big-suite drop-control; size-curriculum) and
+were retrained at their original step counts (2M / 10M / 4M) under today's code, then run
+against the real `uk_terrace` facade for 30 held-out episodes, same as `robot18` above:
+
+![robot ladder checkpoints vs. the real uk_terrace facade](media/house_eval_ladder.png)
+
+The flat-wall metrics do not predict this at all. `robot8_v2` and `robot11_v2` — trained
+on small, fixed-size suites with no arch exposure — both stall around **27% fill**, and
+both reach only the first (leftmost, easiest) ring's strike in *every* one of 30 episodes;
+the other two rings never close. Drop control does show up, just not where fill would
+suggest: `robot11_v2`'s within-tolerance precision is **26%** against `robot8_v2`'s **8%**,
+the same drop-control effect the original `robot11` measured on flat walls, still present
+here. `robot16_v2` is the real surprise — it has never seen a voussoir in training, yet its
+size curriculum alone gets it to **91% ring closure** and a strike attempt at the jack ring
+in 23 of 30 episodes.
+Traversal and size competence transfer without any arch-specific training; surviving a
+strike does not — `robot16_v2` holds the one ring style (segmental) it always reaches
+perfectly and fails the other two, netting **37%** survival, below `robot18`'s **67%**.
+Only `robot18` — the sole checkpoint actually trained with arch/scenario mixing — reaches
+and survives more than one ring style at all. The lesson: a policy that's solved the flat-
+wall ladder completely can still be nearly useless on a structurally different project: it
+takes training exposure to the *specific* mechanic, not just wall-building competence, to
+close that gap.
+
 ---
 
 ## From a photo to a buildable plan
@@ -452,6 +487,8 @@ uv run python scripts/plot_curves.py runs/robot --baselines media/baselines.json
     --out media/ --include robot5_mlp robot8_mlp robot11_mlp robot16_mlp robot18_mlp
 uv run python scripts/plot_robot_curves.py runs/robot/robot18_mlp_s1_1785778025 --out media/
 uv run python scripts/plot_arch_sweep.py runs/sweep_archbakeoff runs/sweep_archbakeoff_spatial --out media/
+uv run python scripts/eval_house_ladder.py --episodes 30 --out media/house_eval.json
+uv run python scripts/plot_house_eval.py media/house_eval.json --out media/
 ```
 
 ### Frontend & webviz
@@ -507,7 +544,8 @@ train/                ppo.py / ppo_robot.py (single-file, CleanRL-style), agent.
 baselines/            oracle / greedy / random / robot_oracle
 webviz/               episode.py (per-request CLI) + server.py (legacy standalone)
 frontend/             Next.js site - app/{page,replay,build}.tsx, components/
-scripts/              plot_*.py (every figure in this README), eval_baselines.py
+scripts/              plot_*.py (every figure in this README), eval_baselines.py,
+                      eval_house_ladder.py (the ladder vs. the real uk_terrace facade)
 tests/                reward worked-example pin, physics validation, PPO smoke,
                       robot env, scenario-library solvability gate
 vlm/                  image -> FacadePlan (one Gemini vision call + the deterministic tiler)

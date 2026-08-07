@@ -1,13 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GridEditor, type OpeningDraft } from "@/components/GridEditor";
 import { ReplayViewer } from "@/components/ReplayViewer";
 import { MetricsPanel } from "@/components/MetricsPanel";
+import { LiveState, type LivePhase } from "@/components/LiveState";
 import { LIVE_API_BASE, fetchLivePolicies, runLiveEpisode } from "@/lib/traces";
 import type { Metrics, Replay } from "@/lib/replay/types";
 
 const STRUCTURAL_ARCH_STYLES = new Set(["semicircular", "segmental", "jack"]);
+// After this long without an answer, a request is more likely a cold Space waking up than a
+// small plan still computing - see traces.ts's own LIVE_EPISODE_TIMEOUT_MS docs on why a
+// waking Space is otherwise indistinguishable from a slow one until it either answers or
+// actually times out.
+const WAKING_THRESHOLD_MS = 3500;
 
 export default function BuildPage() {
   const [gridCols, setGridCols] = useState(10);
@@ -19,8 +25,11 @@ export default function BuildPage() {
 
   const [replay, setReplay] = useState<Replay | null>(null);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
-  const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [resultLine, setResultLine] = useState("");
+  const [phase, setPhase] = useState<LivePhase | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
+  const wakingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const busy = phase === "sending" || phase === "waking";
 
   // Custom plans are drawn live, one keystroke at a time - there's no way to precompute a
   // matrix for them the way scripts/export_traces.py does for /replay's fixed cases, so this
@@ -35,8 +44,10 @@ export default function BuildPage() {
   }, []);
 
   async function run() {
-    setBusy(true);
-    setStatus("running episode…");
+    setPhase("sending");
+    setResultLine("");
+    clearTimeout(wakingTimer.current);
+    wakingTimer.current = setTimeout(() => setPhase("waking"), WAKING_THRESHOLD_MS);
     try {
       const plan = {
         grid_cols: gridCols,
@@ -61,11 +72,13 @@ export default function BuildPage() {
       r._policy = policy;
       setReplay(r);
       setMetrics(r.metrics);
-      setStatus(`${r.steps.length} placements · seed ${r.seed}`);
+      setResultLine(`${r.steps.length} placements · seed ${r.seed}`);
+      setPhase(null);
     } catch (e) {
-      setStatus("error: " + (e as Error).message);
+      setErrorMessage((e as Error).message);
+      setPhase("error");
     } finally {
-      setBusy(false);
+      clearTimeout(wakingTimer.current);
     }
   }
 
@@ -80,11 +93,9 @@ export default function BuildPage() {
           physically impossible) level. The replay is the feedback, same as any other case.
         </p>
         {!LIVE_API_BASE && (
-          <p className="mt-3 rounded-md border border-line bg-panel px-3 py-2 text-xs text-muted">
-            This deployment has no live backend configured, so custom plans can&rsquo;t be run
-            here - only the precomputed cases on the home page work on this static site. Clone
-            the repo and run it locally (see the README) to use the builder.
-          </p>
+          <div className="mt-3">
+            <LiveState phase="unavailable" />
+          </div>
         )}
       </div>
 
@@ -127,13 +138,19 @@ export default function BuildPage() {
           <button
             onClick={run}
             disabled={busy}
-            className="rounded-md border border-accent bg-accent px-4 py-2 font-semibold text-[#1a1400] disabled:cursor-default disabled:opacity-50"
+            className="rounded-md border border-accent bg-accent px-4 py-2 font-semibold text-accent-ink disabled:cursor-default disabled:opacity-50"
           >
             {busy ? "Running…" : "Run"}
           </button>
-          <span className="text-xs text-muted">{status}</span>
+          {!phase && resultLine && <span className="text-xs text-muted">{resultLine}</span>}
         </fieldset>
       </section>
+
+      {phase && (
+        <div className="mb-6 -mt-2">
+          <LiveState phase={phase} message={phase === "error" ? errorMessage : undefined} />
+        </div>
+      )}
 
       {replay && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">

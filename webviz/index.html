@@ -1,9 +1,18 @@
+<!--
+  KNOWINGLY STALE: this is a third, independent visual skin (its own inline palette below),
+  separate from the Next.js frontend (frontend/lib/replay/shared.ts's PALETTE) and the pygame
+  renderer (atrium_sim/render/palette.py) - both of which were rebuilt onto a shared
+  clay/warm-dark identity; this file wasn't, since it's a standalone zero-dependency page
+  served by webviz/server.py for Tailscale/LAN access, not the deployed product. Left
+  functional rather than deleted (it's still wired up, not dead code) - but its colors will
+  now visibly diverge from every other renderer. Worth a full port or removal, not done here.
+-->
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>atrium-sim · replay</title>
+<title>Monumental.copy · replay</title>
 <style>
   :root {
     --bg: #14161c; --panel: #1b1e26; --panel2: #22262f; --line: #2c313c;
@@ -56,7 +65,7 @@
 </head>
 <body>
 <header>
-  <h1>atrium-sim</h1>
+  <h1>Monumental.copy</h1>
   <span class="sub">watch a policy lay a running-bond wall · reward = live BIM audit (±3&nbsp;mm)</span>
 </header>
 <main>

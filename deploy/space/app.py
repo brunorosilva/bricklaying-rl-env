@@ -29,12 +29,25 @@ def _zerogpu_probe() -> str:
     return f"cuda available inside this call: {torch.cuda.is_available()}"
 
 
-with gr.Blocks(title="atrium-sim webviz API") as demo:
+# A light brand pass on Gradio's own chrome - not a full custom theme (this page explicitly
+# isn't the product, see the Markdown below), just enough that a visitor arriving here
+# straight from HF's Spaces directory sees the same warm-dark/clay identity as the actual
+# frontend, not Gradio's cheerful default.
+BRAND_CSS = """
+.gradio-container { background: #0F0E0D !important; }
+.gradio-container, .gradio-container * { color: #EDE9E3; }
+a, a:visited { color: #F2B94B !important; }
+"""
+
+with gr.Blocks(title="Monumental.copy webviz API", css=BRAND_CSS) as demo:
     gr.Markdown(
-        "# atrium-sim webviz API\n\n"
-        "Live backend for the [atrium-sim frontend](https://brunorosilva.github.io/bricklaying-rl-env/) "
-        "- not a UI meant to be used directly. See `/docs` for the actual API "
-        "(`GET /policies`, `POST /episode`)."
+        "# 🧱 Monumental.copy\n\n"
+        "**This page isn't the product** - it's the live physics backend behind "
+        "[**the Monumental.copy frontend**](https://brunorosilva.github.io/bricklaying-rl-env/), "
+        "which is where you actually want to be. The featured policy there lays a "
+        "16-module wall to **100% fill, 99.4% within ±3&nbsp;mm** of blueprint - real "
+        "rigid-body physics underneath, judged like a site inspection.\n\n"
+        "See `/docs` for the raw API this Space exposes (`GET /policies`, `POST /episode`)."
     )
     # hidden: exists only so the ZeroGPU platform check above finds a wired @spaces.GPU
     # function; nothing in the real API path calls this.

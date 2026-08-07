@@ -221,7 +221,7 @@ function ReplayPageInner() {
                 syncUrl({ policy, spec, scenario, seed });
                 run(policy, seed, spec, scenario, env, manifest);
               }}
-              className="rounded-md border border-accent bg-accent px-3 py-2 font-semibold text-[#1a1400] disabled:cursor-default disabled:opacity-50"
+              className="rounded-md border border-accent bg-accent px-3 py-2 font-semibold text-accent-ink disabled:cursor-default disabled:opacity-50"
             >
               {busy ? "Running…" : "Generate"}
             </button>

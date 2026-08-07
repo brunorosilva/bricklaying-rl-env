@@ -1,23 +1,26 @@
 import Link from "next/link";
 import { CaseGallery } from "@/components/CaseGallery";
+import { HeroStage } from "@/components/HeroStage";
 
 export default function Home() {
   return (
-    <main className="mx-auto max-w-6xl px-5 py-10">
-      <div className="mb-8 max-w-2xl">
-        <h1 className="text-2xl font-semibold text-ink">Watch a policy lay a wall</h1>
-        <p className="mt-2 text-sm leading-relaxed text-muted">
-          A physics-based bricklaying RL environment: a mobile gantry robot places bricks
-          against a blueprint and is scored like a real mason - every brick within BIM
-          ±3&nbsp;mm tolerance, minimal waste, live physics, so a sloppy placement can topple
-          the wall. Pick a case below, or{" "}
-          <Link href="/build" className="text-accent hover:underline">
-            paint your own grid
-          </Link>
-          .
-        </p>
+    <main>
+      <HeroStage />
+      <div className="mx-auto max-w-6xl px-5 py-10">
+        <div className="mb-8 max-w-2xl">
+          <h2 className="text-xl font-semibold text-ink">Pick a case</h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            Every card below is a precomputed replay - a different wall size, facade, or
+            baseline policy, scored the same way: every brick within BIM ±3&nbsp;mm tolerance,
+            minimal waste, live physics underneath. Or{" "}
+            <Link href="/build" className="text-accent hover:underline">
+              paint your own grid
+            </Link>
+            .
+          </p>
+        </div>
+        <CaseGallery />
       </div>
-      <CaseGallery />
     </main>
   );
 }

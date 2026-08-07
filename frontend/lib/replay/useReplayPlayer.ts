@@ -2,7 +2,20 @@
 
 import { useEffect, useRef, useState } from "react";
 import { computeView, drawScene, drawStrip } from "./draw";
+import type { ViewMode } from "./shared";
 import type { Frame, Replay, View } from "./types";
+
+/** Flattens a replay's per-step tick arrays into one timeline, `gi` numbering ticks globally
+ * across the whole episode - the shape both replay renderers (and anything deriving its own
+ * playhead over the same data, e.g. the Strike/Compare pages) consume. Pulled out of
+ * useReplayPlayer's own reset effect so those pages don't re-implement (or subtly diverge
+ * from) the same flattening. */
+export function flattenReplay(replay: Replay): Frame[] {
+  let gi = 0;
+  return replay.steps.flatMap((st) =>
+    st.ticks.map((bricks, j) => ({ st, bricks, base: st.base_ticks?.[j], gi: gi++ })),
+  );
+}
 
 /**
  * Owns the replay's animation state (refs, not React state, for the 60fps-adjacent hot
@@ -14,8 +27,16 @@ import type { Frame, Replay, View } from "./types";
  * cssSize*devicePixelRatio and the 2D context is scaled once, so drawing code in draw.ts
  * always works in plain CSS pixels - fixes the original's fixed 900x584 bitmap (soft/blurry
  * on HiDPI, and never recomputed on resize).
+ *
+ * `opts.loop`/`opts.autoplay` exist for the home page hero (a looping, autoplaying build) -
+ * every other caller leaves both off and gets the original stop-at-the-end, click-to-play
+ * behavior.
  */
-export function useReplayPlayer(replay: Replay | null) {
+export function useReplayPlayer(replay: Replay | null, opts?: { loop?: boolean; autoplay?: boolean }) {
+  // named loopOpt (not `loop`) - the rAF tick callback further down is itself already named
+  // `loop`, and shadowing that would be needlessly confusing to read.
+  const loopOpt = opts?.loop ?? false;
+  const autoplay = opts?.autoplay ?? false;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stripRef = useRef<HTMLCanvasElement>(null);
   const scrubRef = useRef<HTMLInputElement>(null);
@@ -26,6 +47,9 @@ export function useReplayPlayer(replay: Replay | null) {
   const playingRef = useRef(false);
   const speedRef = useRef(2);
   const labelsRef = useRef(false);
+  const modeRef = useRef<ViewMode>("as-built");
+  const loopRef = useRef(loopOpt);
+  loopRef.current = loopOpt;
   const viewRef = useRef<View | null>(null);
   const cssSizeRef = useRef({ w: 0, h: 0 });
 
@@ -40,14 +64,12 @@ export function useReplayPlayer(replay: Replay | null) {
       setFrameCount(0);
       return;
     }
-    let gi = 0;
-    tlRef.current = replay.steps.flatMap((st) =>
-      st.ticks.map((bricks, j) => ({ st, bricks, base: st.base_ticks?.[j], gi: gi++ })),
-    );
+    tlRef.current = flattenReplay(replay);
     curRef.current = 0;
-    playingRef.current = false;
-    setPlaying(false);
+    playingRef.current = autoplay;
+    setPlaying(autoplay);
     setFrameCount(tlRef.current.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replay]);
 
   // DPR + resize: recompute the backing store and the world->pixel transform whenever the
@@ -114,9 +136,13 @@ export function useReplayPlayer(replay: Replay | null) {
         if (playingRef.current) {
           curRef.current += 30 * speedRef.current * dt;
           if (curRef.current >= tl.length - 1) {
-            curRef.current = tl.length - 1;
-            playingRef.current = false;
-            setPlaying(false);
+            if (loopRef.current) {
+              curRef.current = 0;
+            } else {
+              curRef.current = tl.length - 1;
+              playingRef.current = false;
+              setPlaying(false);
+            }
           }
         }
         const ci = Math.min(Math.max(0, Math.floor(curRef.current)), tl.length - 1);
@@ -127,7 +153,7 @@ export function useReplayPlayer(replay: Replay | null) {
         if (view && canvas) {
           const ctx = canvas.getContext("2d");
           const { w, h } = cssSizeRef.current;
-          if (ctx && w > 0) drawScene(ctx, w, h, view, replay, tl[ci], { labels: labelsRef.current });
+          if (ctx && w > 0) drawScene(ctx, w, h, view, replay, tl[ci], { labels: labelsRef.current, mode: modeRef.current });
         }
 
         // --- renderer-agnostic chrome (no world transform): strip, scrubber, frame label.
@@ -180,13 +206,17 @@ export function useReplayPlayer(replay: Replay | null) {
     labelsRef.current = v;
   };
 
+  const setMode = (v: ViewMode) => {
+    modeRef.current = v;
+  };
+
   return {
     canvasRef, stripRef, scrubRef, frameLabelRef,
-    playing, frameCount, togglePlay, seek, setSpeed, setLabels,
+    playing, frameCount, togglePlay, seek, setSpeed, setLabels, setMode,
     // exposed for SceneCanvas (the 3D renderer): it reads the SAME playhead this hook
     // advances (tlRef/curRef) via its own useFrame instead of a second requestAnimationFrame
     // loop - only one visual is ever mounted at a time (see the 2D/3D toggle in
     // ReplayViewer), but the playhead is one shared source of truth either way.
-    tlRef, curRef, labelsRef,
+    tlRef, curRef, labelsRef, modeRef,
   };
 }

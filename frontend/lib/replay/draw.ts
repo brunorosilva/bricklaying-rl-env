@@ -6,19 +6,17 @@
 
 import type { Brick, Frame, HardBody, Match, Replay, Target, View } from "./types";
 import {
-  ARM_MARGIN_MM, COURSE_MM, H_MAX, HARD_BODY_COLORS, HUD_H, MARGIN_MM,
-  PALETTE, foldDeg, qualityColor,
+  ARM_MARGIN_MM, COURSE_MM, GHOST_OPACITY, H_MAX, HARD_BODY_COLORS, HUD_H, MARGIN_MM,
+  NEXT_SLOT_OPACITY, PALETTE, SUBSTRATE, brickColorHex, brickFace as sharedBrickFace, foldDeg,
+  type BrickStatus, type ViewMode,
 } from "./shared";
 
-// palette aliases (exact atrium_sim/render/renderer.py values, see shared.ts) - kept as
-// short local names so the drawing code below reads the same as before the extraction
+// palette aliases (see shared.ts's PALETTE/SUBSTRATE) - kept as short local names so the
+// drawing code below reads the same as before the extraction
 const BG = PALETTE.bg;
 const GROUND = PALETTE.ground;
-const GHOST = PALETTE.ghost;
-const NEXT_SLOT = PALETTE.nextSlot;
+const CHALK = PALETTE.chalk;
 const MORTAR = PALETTE.mortar;
-const TERRACOTTA = PALETTE.terracotta;
-const STRAY = PALETTE.stray;
 const HUD_BG = PALETTE.hudBg;
 const HUD_TEXT = PALETTE.hudText;
 const LABEL = PALETTE.label;
@@ -27,8 +25,16 @@ const ROBOT_DARK = PALETTE.robotDark;
 const ROBOT_TOOL = PALETTE.robotTool;
 const STONE = PALETTE.stone;
 const STONE_EDGE = PALETTE.stoneEdge;
-const VOUSSOIR_FACE = PALETTE.voussoirFace;
 const REACH_BAND = PALETTE.reachBand;
+
+/** "#RRGGBB" + alpha -> "rgba(...)" - canvas fillStyle/strokeStyle has no separate opacity
+ * channel the way a three.js material does, so ghost/next-slot targets (chalk at
+ * GHOST_OPACITY/NEXT_SLOT_OPACITY - see shared.ts) get flattened into an rgba string here
+ * instead of relying on a second opacity parameter. */
+function withAlpha(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
 
 export function computeView(lengthMm: number, nCourses: number, cssW: number, cssH: number): View {
   const xmin = -MARGIN_MM;
@@ -119,7 +125,7 @@ function drawGantry(
   ctx.fill();
   for (const wx of [bx - 15, bx + 15]) {
     ctx.beginPath(); ctx.arc(wx, gy0, 6, 0, Math.PI * 2);
-    ctx.fillStyle = "#1c1e24"; ctx.fill();
+    ctx.fillStyle = SUBSTRATE.bg; ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = ROBOT; ctx.stroke();
   }
 
@@ -140,9 +146,10 @@ function drawGantry(
   ctx.lineCap = "butt";
 }
 
-export type DrawOpts = { labels: boolean };
+export type DrawOpts = { labels: boolean; mode: ViewMode };
 
 export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: number, v: View, replay: Replay, frame: Frame, opts: DrawOpts) {
+  const { mode } = opts;
   ctx.clearRect(0, 0, cssW, cssH);
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, cssW, cssH);
@@ -165,7 +172,9 @@ export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
   const matchByBrick = new Map<number, Match>();
   for (const m of matches) { matchByTarget.set(m.target_id, m); matchByBrick.set(m.brick_id, m); }
 
-  // ghost blueprint + the next expected slot (cursor's course, leftmost unfilled)
+  // ghost blueprint + the next expected slot (cursor's course, leftmost unfilled) - always
+  // chalk, differing only in opacity, so "not yet real" is one consistent hue rather than
+  // competing with the wall's own material or measurement colors (see shared.ts)
   const cursor = frame.st.cursor;
   let nextTarget: Target | null = null;
   if (cursor != null) {
@@ -177,18 +186,21 @@ export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
   for (const t of replay.targets) {
     if (matchByTarget.has(t.tid)) continue;
     if (t === nextTarget) {
-      strokePoly(ctx, rectCorners(v, t.x, t.y, t.w, t.h, 0), NEXT_SLOT, 2);
+      strokePoly(ctx, rectCorners(v, t.x, t.y, t.w, t.h, 0), withAlpha(CHALK, NEXT_SLOT_OPACITY), 2);
     } else {
-      dashedRect(ctx, v, GHOST, t.x, t.y, t.w, t.h);
+      dashedRect(ctx, v, withAlpha(CHALK, GHOST_OPACITY), t.x, t.y, t.w, t.h);
     }
   }
 
-  // static hard bodies (lintels/sills/cement heads, arch centering/skewback), faded in by
-  // the frame index at which they first appear
+  // static hard bodies (lintels/sills/cement heads, arch centering/skewback) - faded in at
+  // `appear` and, for a struck arch's centering, faded back out at `disappear` (see
+  // webviz/trajectory.py's _capture_hard and types.ts's HardBody). "drawing" mode flattens
+  // every material to chalk - an elevation is a line drawing, not a render.
   for (const hb of replay.hard_bodies ?? ([] as HardBody[])) {
-    if (hb.appear > frame.gi) continue;
+    if (hb.appear > frame.gi || frame.gi >= (hb.disappear ?? Infinity)) continue;
     const pts = hb.verts.map(([x, y]) => [px(v, x), py(v, y)] as Pt);
-    const [fill, edge] = HARD_BODY_COLORS[hb.kind] ?? [STONE, STONE_EDGE];
+    const fill = mode === "drawing" ? CHALK : HARD_BODY_COLORS[hb.kind]?.[0] ?? STONE;
+    const edge = mode === "drawing" ? CHALK : HARD_BODY_COLORS[hb.kind]?.[1] ?? STONE_EDGE;
     fillPoly(ctx, pts, fill);
     strokePoly(ctx, pts, edge, 2);
   }
@@ -200,20 +212,21 @@ export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
     const [x, y, theta, kind, brickId] = b;
     if (kind === 2 && b.length === 6) {
       // real structural arch wedge: arbitrary polygon, not scored by the flat-wall audit -
-      // its own distinct material, no quality tint/label (matches renderer.py exactly)
+      // "flight" status is the honest read in every mode (see shared.ts's brickColorRgb).
       const pts = polyCorners(v, x, y, theta, b[5]);
-      fillPoly(ctx, pts, VOUSSOIR_FACE);
+      const faceColor = brickColorHex(mode, brickId, "flight", null, null);
+      fillPoly(ctx, pts, faceColor);
       strokePoly(ctx, pts, MORTAR, 2);
       continue;
     }
-    const w = kind === 1 ? 100 : 210, h = 50;
+    const [w, h] = sharedBrickFace(kind);
     const m = matchByBrick.get(brickId);
-    let face: string = STRAY;
-    if (m) face = qualityColor(m.d, m.in_tol);
-    else if (foldDeg(theta) < 15) face = TERRACOTTA; // upright, in flight / not yet audited
+    const upright = foldDeg(theta) < 15;
+    const status: BrickStatus = m ? "matched" : upright ? "flight" : "stray";
+    const face = brickColorHex(mode, brickId, status, m?.dx ?? null, m?.in_tol ?? null);
     fillPoly(ctx, rectCorners(v, x, y, w + 9, h + 9, theta), MORTAR);
     fillPoly(ctx, rectCorners(v, x, y, w, h, theta), face);
-    if (opts.labels && m) {
+    if (opts.labels && m && !m.in_tol && mode === "inspect") {
       ctx.fillStyle = LABEL;
       ctx.fillText(`${m.dx >= 0 ? "+" : ""}${m.dx.toFixed(1)}`, px(v, x), py(v, y + h / 2 + 14));
     }
@@ -228,16 +241,16 @@ export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
   ctx.fillRect(0, 0, cssW, HUD_H);
   ctx.textAlign = "left";
   ctx.font = "13px var(--font-mono), monospace";
-  ctx.fillStyle = NEXT_SLOT;
-  ctx.fillText("atrium-sim", 12, 20);
+  ctx.fillStyle = PALETTE.accent;
+  ctx.fillText("Monumental.copy", 12, 20);
   ctx.fillStyle = HUD_TEXT;
   const st = frame.st;
   const tail = isRobot ? `moves ${st.moves ?? 0}   placed ${st.placements ?? 0}` : `waste ${st.waste ?? 0}`;
-  const mode = isRobot ? `${["place", "move ←", "move →"][st.mode ?? 0]}   ` : "";
+  const modeLabel = isRobot ? `${["place", "move ←", "move →"][st.mode ?? 0]}   ` : "";
   ctx.fillText(
     `${replay._policy ?? ""}   ${replay.spec.n_modules}m × ${replay.spec.n_courses}c   ` +
-      `step ${st.i + 1}/${replay.steps.length}   ${mode}in-tol ${(st.frac_in_tol * 100).toFixed(0)}%   ` +
-      `filled ${(st.frac_filled * 100).toFixed(0)}%   ${tail}   return ${st.return.toFixed(2)}`,
+      `step ${st.i + 1}/${replay.steps.length}   ${modeLabel}in-tol ${(st.frac_in_tol * 100).toFixed(0)}%   ` +
+      `filled ${(st.frac_filled * 100).toFixed(0)}%   ${tail}   return ${st.return.toFixed(2)}   view ${mode}`,
     12,
     44,
   );
@@ -247,12 +260,12 @@ export function drawStrip(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
   ctx.clearRect(0, 0, cssW, cssH);
   const steps = replay.steps, n = steps.length, bw = cssW / n, mid = cssH * 0.55;
   const maxAbs = Math.max(0.5, ...steps.map((s) => Math.abs(s.reward)));
-  ctx.strokeStyle = "#323847";
+  ctx.strokeStyle = SUBSTRATE.line;
   ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(cssW, mid); ctx.stroke();
   for (let i = 0; i < n; i++) {
     const r = steps[i].reward;
     const hgt = (Math.abs(r) / maxAbs) * (cssH * 0.42);
-    ctx.fillStyle = i === curStep ? "#f0c850" : r >= 0 ? "#5fb45a" : "#d64b45";
+    ctx.fillStyle = i === curStep ? PALETTE.accent : r >= 0 ? PALETTE.good : PALETTE.bad;
     ctx.fillRect(i * bw + 0.5, r >= 0 ? mid - hgt : mid, Math.max(1, bw - 1), hgt);
   }
 }

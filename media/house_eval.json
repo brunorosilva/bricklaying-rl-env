@@ -1,0 +1,34 @@
+{
+  "robot8_v2": {
+    "frac_filled": 0.27647058823529413,
+    "frac_in_tol": 0.08235294117647061,
+    "ring_closure": 0.36842105263157887,
+    "arch_strike_survival": 1.0,
+    "semicircular_survival": 1.0
+  },
+  "robot11_v2": {
+    "frac_filled": 0.27196078431372545,
+    "frac_in_tol": 0.25705882352941173,
+    "ring_closure": 0.36842105263157887,
+    "arch_strike_survival": 0.0,
+    "semicircular_survival": 0.0
+  },
+  "robot16_v2": {
+    "frac_filled": 0.5417647058823528,
+    "frac_in_tol": 0.4358823529411765,
+    "ring_closure": 0.9140350877192983,
+    "arch_strike_survival": 0.3722222222222223,
+    "semicircular_survival": 0.0,
+    "segmental_survival": 1.0,
+    "jack_survival": 0.0
+  },
+  "robot18": {
+    "frac_filled": 0.5882352941176471,
+    "frac_in_tol": 0.45882352941176474,
+    "ring_closure": 1.0,
+    "arch_strike_survival": 0.6666666666666669,
+    "semicircular_survival": 1.0,
+    "segmental_survival": 1.0,
+    "jack_survival": 0.0
+  }
+}

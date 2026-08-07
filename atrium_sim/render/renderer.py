@@ -1,12 +1,17 @@
 """Pygame renderer: ghost blueprint, quality-coloured bricks, mm HUD.
 
-Visual language:
-- dashed light outlines = unfilled blueprint targets ("ghosts"); the next
-  expected slot is highlighted;
-- placed bricks show a mortar-grey envelope band under a terracotta face;
-- once matched, the face is tinted by placement quality: green (within ±3mm),
-  amber (close), red (poor); strays go dark;
-- matched bricks carry a small "+2.1" mm deviation label.
+Visual language (see atrium_sim/render/palette.py for the actual color values/formulas,
+mirrored 1:1 in frontend/lib/replay/shared.ts so the GIFs and the browser renderers read as
+one product, not three skins of one idea):
+- dashed chalk outlines = unfilled blueprint targets ("ghosts"); the next expected slot is
+  the same hue, just less translucent;
+- placed bricks show a mortar-grey envelope band under a jittered-clay face;
+- `mode` picks what the face color actually encodes: "as-built" (the default look - clay,
+  deviation not shown at all), "inspect" (the audit's own signed-deviation ramp - what every
+  GIF in this project's README has shown historically, since the README's whole story is
+  about that measurement), or "drawing" (flat chalk - a line drawing, not a render);
+- matched, out-of-tolerance bricks carry a small "+2.1" mm deviation label, in "inspect" mode
+  only - a healthy wall should look calm, not be littered with labels on every brick.
 """
 
 from __future__ import annotations
@@ -16,8 +21,9 @@ import math
 import numpy as np
 
 from atrium_sim.blueprint import BrickKind, Blueprint, brick_face
-from atrium_sim.constants import COURSE_MM, H_MAX, TOL_MM
+from atrium_sim.constants import COURSE_MM, H_MAX
 from atrium_sim.physics import BrickPose
+from atrium_sim.render import palette as pal
 
 SCALE = 0.5  # px per mm
 MARGIN_MM = 150.0
@@ -25,40 +31,21 @@ HUD_H = 64
 Y_TOP_MM = H_MAX + 170.0  # show sky so drops/topples are visible
 Y_BOT_MM = -30.0
 
-BG = (24, 26, 32)
-GROUND = (70, 72, 78)
-GHOST = (110, 115, 125)
-NEXT_SLOT = (240, 200, 80)
-MORTAR = (105, 100, 95)
-TERRACOTTA = (178, 92, 62)
-STRAY = (90, 45, 40)
-HUD_TEXT = (225, 225, 220)
-LABEL = (200, 205, 215)
-ROBOT = (90, 170, 220)        # mobile gantry body
-ROBOT_DARK = (60, 120, 165)
-ROBOT_TOOL = (240, 200, 80)   # the descending tool / gripper
-CEMENT = (150, 148, 143)      # curved cement heads (arches) - the "hard material"
-STONE = (178, 172, 160)       # lintels / sills
-STONE_EDGE = (110, 108, 104)
-CENTERING = (120, 95, 60)     # temporary timber former - visible only until struck
-VOUSSOIR_FACE = (178, 92, 62)  # real structural arch voussoirs (dynamic bricks, not sensors)
-
-
-def _quality_color(d: float, in_tol: bool) -> tuple[int, int, int]:
-    if in_tol:
-        return (95, 180, 90)
-    # amber -> red as error grows past tolerance
-    t = min(1.0, (d - TOL_MM) / 15.0)
-    return (int(200 + 30 * t), int(150 * (1 - t) + 30), 40)
+# Ghost/next-slot targets are chalk at GHOST_OPACITY/NEXT_SLOT_OPACITY in the browser
+# renderers (a real alpha channel); pygame's draw.polygon/draw.line have none, so these are
+# pre-blended onto the (fixed) background color once, rather than per frame.
+_GHOST_COLOR = pal.blend(pal.CHALK, pal.BG, pal.GHOST_OPACITY)
+_NEXT_SLOT_COLOR = pal.blend(pal.CHALK, pal.BG, pal.NEXT_SLOT_OPACITY)
 
 
 class PygameRenderer:
-    def __init__(self, blueprint: Blueprint, render_mode: str | None):
+    def __init__(self, blueprint: Blueprint, render_mode: str | None, mode: str = "inspect"):
         import pygame
 
         self.pygame = pygame
         self.blueprint = blueprint
         self.render_mode = render_mode
+        self.mode = mode  # "as-built" | "inspect" | "drawing" - see module docstring
         # viewport top is size-aware: tall facades (a 40-course pier, a 13-course house with
         # arched heads) must fit, not just the old fixed H_MAX (6 courses). Leaves sky headroom.
         self.y_top = max(Y_TOP_MM, blueprint.n_courses * COURSE_MM + 170.0)
@@ -112,15 +99,15 @@ class PygameRenderer:
     # --- main draw --------------------------------------------------------------
 
     def draw(self, poses: list[BrickPose], report, hud: dict, cursor: int,
-             robot: tuple | None = None, hard_bodies: list | None = None) -> np.ndarray | None:
+              robot: tuple | None = None, hard_bodies: list | None = None) -> np.ndarray | None:
         pg = self.pygame
         surf = self.surface
-        surf.fill(BG)
+        surf.fill(pal.BG)
 
         # ground
         gx0, gy0 = self._to_px(-MARGIN_MM, 0)
         pg.draw.rect(
-            surf, GROUND, pg.Rect(0, gy0, self.w_px, self.h_px - gy0)
+            surf, pal.GROUND, pg.Rect(0, gy0, self.w_px, self.h_px - gy0)
         )
 
         # mobile robot: shaded reach window (behind everything; the body is drawn
@@ -130,7 +117,7 @@ class PygameRenderer:
             lx, _ = self._to_px(base_x - reach, 0)
             rx, _ = self._to_px(base_x + reach, 0)
             band = pg.Surface((max(1, rx - lx), self.h_px - gy0), pg.SRCALPHA)
-            band.fill((240, 200, 80, 20))
+            band.fill((*pal.ROBOT_TOOL, 20))
             surf.blit(band, (lx, gy0))
 
         # ghost blueprint + next expected slot
@@ -144,28 +131,31 @@ class PygameRenderer:
                 continue
             w, h = brick_face(t.kind)
             if t.tid == next_tid:
-                pg.draw.polygon(surf, NEXT_SLOT, self._rect_corners(t.x, t.y, w, h, 0.0), 2)
+                pg.draw.polygon(surf, _NEXT_SLOT_COLOR, self._rect_corners(t.x, t.y, w, h, 0.0), 2)
             else:
-                self._dashed_rect(GHOST, t.x, t.y, w, h)
+                self._dashed_rect(_GHOST_COLOR, t.x, t.y, w, h)
 
         # static hard bodies: lintels/sills/cement heads (permanent) and the arch centering/
         # skewback (centering is temporary - visible only until the ring closes and it's struck;
         # "voussoir" here is the older cosmetic lintel_soldier style's sensor fringe, kept
-        # distinct from the real dynamic VOUSSOIR bricks drawn below)
+        # distinct from the real dynamic VOUSSOIR bricks drawn below). "drawing" mode flattens
+        # every material to chalk - an elevation is a line drawing, not a render.
         for _sid, kind, verts in (hard_bodies or []):
             pts = [self._to_px(x, y) for x, y in verts]
             if len(pts) < 3:
                 continue
-            if kind == "voussoir":
-                fill, edge = TERRACOTTA, MORTAR
+            if self.mode == "drawing":
+                fill, edge = pal.CHALK, pal.CHALK
+            elif kind == "voussoir":
+                fill, edge = pal.CLAY, pal.MORTAR
             elif kind == "centering":
-                fill, edge = CENTERING, (80, 60, 35)
+                fill, edge = pal.TIMBER, pal.TIMBER_EDGE
             elif kind == "skewback":
-                fill, edge = STONE, STONE_EDGE
+                fill, edge = pal.STONE, pal.STONE_EDGE
             elif kind == "cement":
-                fill, edge = CEMENT, STONE_EDGE
+                fill, edge = pal.CEMENT, pal.STONE_EDGE
             else:
-                fill, edge = STONE, STONE_EDGE
+                fill, edge = pal.STONE, pal.STONE_EDGE
             pg.draw.polygon(surf, fill, pts)
             pg.draw.polygon(surf, edge, pts, 2)
 
@@ -174,26 +164,28 @@ class PygameRenderer:
         stray_ids = set(report.stray_bricks)
         for p in poses:
             if p.kind == BrickKind.VOUSSOIR and p.verts:
-                # a real structural arch wedge: arbitrary polygon, not a fixed (w, h) box - not
-                # scored by the flat-wall audit (report never contains a VOUSSOIR match), so no
-                # quality tint/label; rendered as its own distinct material instead.
+                # a real structural arch wedge: arbitrary polygon, not scored by the flat-wall
+                # audit - "flight" status is the honest read in every mode (see palette.py's
+                # brick_color / shared.ts's brickColorRgb for the shared rule table).
                 pts = self._poly_corners(p.x, p.y, p.theta, p.verts)
                 if len(pts) >= 3:
-                    pg.draw.polygon(surf, VOUSSOIR_FACE, pts)
-                    pg.draw.polygon(surf, MORTAR, pts, 2)
+                    face = pal.brick_color(self.mode, p.brick_id, "flight", None, None)
+                    pg.draw.polygon(surf, face, pts)
+                    pg.draw.polygon(surf, pal.MORTAR, pts, 2)
                 continue
             w, h = brick_face(p.kind)
             m = match_by_brick.get(p.brick_id)
             if m is not None:
-                face = _quality_color(m.d, m.in_tol)
+                status, dx, in_tol = "matched", m.dx, m.in_tol
             elif p.brick_id in stray_ids:
-                face = STRAY
+                status, dx, in_tol = "stray", None, None
             else:
-                face = TERRACOTTA  # mid-fall / not yet audited
-            pg.draw.polygon(surf, MORTAR, self._rect_corners(p.x, p.y, w + 9, h + 9, p.theta))
+                status, dx, in_tol = "flight", None, None
+            face = pal.brick_color(self.mode, p.brick_id, status, dx, in_tol)
+            pg.draw.polygon(surf, pal.MORTAR, self._rect_corners(p.x, p.y, w + 9, h + 9, p.theta))
             pg.draw.polygon(surf, face, self._rect_corners(p.x, p.y, w, h, p.theta))
-            if m is not None:
-                label = self.font.render(f"{m.dx:+.1f}", True, LABEL)
+            if m is not None and not m.in_tol and self.mode == "inspect":
+                label = self.font.render(f"{m.dx:+.1f}", True, pal.LABEL)
                 lx, ly = self._to_px(p.x, p.y + h / 2 + 14)
                 surf.blit(label, (lx - label.get_width() / 2, ly))
 
@@ -202,10 +194,10 @@ class PygameRenderer:
             self._draw_robot_body(robot, poses)
 
         # HUD
-        pg.draw.rect(surf, (18, 19, 24), pg.Rect(0, 0, self.w_px, HUD_H))
-        text = "   ".join(f"{k}: {v}" for k, v in hud.items())
-        surf.blit(self.hud_font.render("atrium-sim", True, NEXT_SLOT), (10, 8))
-        surf.blit(self.hud_font.render(text, True, HUD_TEXT), (10, 34))
+        pg.draw.rect(surf, pal.HUD_BG, pg.Rect(0, 0, self.w_px, HUD_H))
+        text = "   ".join(f"{k}: {v}" for k, v in hud.items()) + f"   view: {self.mode}"
+        surf.blit(self.hud_font.render("atrium-sim", True, pal.ACCENT), (10, 8))
+        surf.blit(self.hud_font.render(text, True, pal.HUD_TEXT), (10, 34))
 
         if self.render_mode == "human":
             self.window.blit(surf, (0, 0))
@@ -231,14 +223,14 @@ class PygameRenderer:
 
         # top beam spanning the reach window
         half = int(reach * SCALE)
-        pg.draw.line(surf, ROBOT, (bx - half, beam_py), (bx + half, beam_py), 5)
+        pg.draw.line(surf, pal.ROBOT, (bx - half, beam_py), (bx + half, beam_py), 5)
         # vertical mast up the middle
-        pg.draw.line(surf, ROBOT, (bx, gy0 - 10), (bx, beam_py), 6)
+        pg.draw.line(surf, pal.ROBOT, (bx, gy0 - 10), (bx, beam_py), 6)
         # wheeled chassis on the rail
-        pg.draw.rect(surf, ROBOT_DARK, pg.Rect(bx - 26, gy0 - 15, 52, 15), border_radius=4)
+        pg.draw.rect(surf, pal.ROBOT_DARK, pg.Rect(bx - 26, gy0 - 15, 52, 15), border_radius=4)
         for wx in (bx - 15, bx + 15):
-            pg.draw.circle(surf, (28, 30, 36), (wx, gy0), 6)
-            pg.draw.circle(surf, ROBOT, (wx, gy0), 6, 2)
+            pg.draw.circle(surf, pal.BG, (wx, gy0), 6)
+            pg.draw.circle(surf, pal.ROBOT, (wx, gy0), 6, 2)
 
         # tool: descends from the beam to the current brick (the last-spawned pose),
         # clamped into the reach window — shows how high the release was
@@ -248,9 +240,9 @@ class PygameRenderer:
             tpx, _ = self._to_px(tool_x, 0.0)
             _, tpy = self._to_px(0.0, p.y + brick_face(p.kind)[1] / 2)
             tpx, tpy = int(tpx), int(tpy)
-            pg.draw.line(surf, ROBOT, (tpx, beam_py), (tpx, beam_py + 4), 8)  # trolley on beam
-            pg.draw.line(surf, ROBOT_TOOL, (tpx, beam_py), (tpx, tpy), 3)      # descending tool
-            pg.draw.circle(surf, ROBOT_TOOL, (tpx, tpy), 5)                    # gripper head
+            pg.draw.line(surf, pal.ROBOT, (tpx, beam_py), (tpx, beam_py + 4), 8)  # trolley on beam
+            pg.draw.line(surf, pal.ROBOT_TOOL, (tpx, beam_py), (tpx, tpy), 3)      # descending tool
+            pg.draw.circle(surf, pal.ROBOT_TOOL, (tpx, tpy), 5)                    # gripper head
 
     def close(self):
         if self.window is not None:

@@ -119,14 +119,30 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None, pla
     u = env.unwrapped
     flat: list[tuple[float, list]] = []  # (base_x, poses)
     hard: list[dict] = []                # static bodies, recorded once with their appear-frame
-    seen: set[int] = set()
+    hard_by_sid: dict[int, dict] = {}    # sid -> its entry in `hard`, so a later disappearance
+                                          # gets stamped onto the SAME dict, not a duplicate
+    active_sids: set[int] = set()        # sids present in the world as of the last capture
 
     def _capture_hard():
+        frame_i = max(0, len(flat) - 1)
+        current_sids: set[int] = set()
         for sid, kind, verts in u.world.hard_poses():
-            if sid not in seen:
-                seen.add(sid)
-                hard.append({"kind": kind, "appear": max(0, len(flat) - 1),
-                             "verts": [[round(x, 1), round(y, 1)] for x, y in verts]})
+            current_sids.add(sid)
+            if sid not in hard_by_sid:
+                entry = {"kind": kind, "appear": frame_i,
+                         "verts": [[round(x, 1), round(y, 1)] for x, y in verts]}
+                hard.append(entry)
+                hard_by_sid[sid] = entry
+        # A sid that WAS active and isn't anymore has genuinely left the physics world - the
+        # only case today is a struck arch's centering (removed by robot_env._strike_arch
+        # once its ring closes). Without this, the replay had no way to express "this stopped
+        # existing", so the frontend drew the timber former under every arch for the rest of
+        # the episode even after the real one was gone (see frontend/lib/replay/types.ts's
+        # HardBody.disappear and the two renderers that gate on it).
+        for sid in active_sids - current_sids:
+            hard_by_sid[sid]["disappear"] = frame_i
+        active_sids.clear()
+        active_sids.update(current_sids)
 
     def _tick():
         flat.append((round(u.base_x, 1), _snapshot(u.world)))
@@ -176,6 +192,17 @@ def record_robot_trajectory(env, policy, seed: int | None = None, spec=None, pla
         "targets": _targets_json(u.blueprint),
         "robot": {"reach": u.env_cfg.reach_mm},
         "hard_bodies": hard,
+        # One entry per real structural arch (semicircular/segmental/jack), in GLOBAL mm - not
+        # per-tick data, so this is cheap to add. Lets the frontend (the "Strike" page
+        # specifically) group voussoir bricks and hard_bodies by which arch they belong to
+        # PURELY by x-range, without needing arch identity threaded through BrickPose/the
+        # physics core (voussoir bricks don't carry it once spawned - see atrium_sim.physics's
+        # BrickPose, which has no arch_id field - only the pre-spawn BrickTarget does).
+        "arch_regions": [
+            {"index": r.opening_index, "style": r.spec.kind,
+             "x0": round(r.void_x0, 1), "x1": round(r.void_x1, 1), "spring_y": round(r.spring_y, 1)}
+            for r in getattr(u, "_arch_regions", [])
+        ],
         "steps": steps,
         "metrics": {k: round(float(v), 4) for k, v in metrics.items()},
         "seed": seed,

@@ -8,7 +8,7 @@ export function StageCanvas({ canvasRef }: { canvasRef: RefObject<HTMLCanvasElem
   return (
     <canvas
       ref={canvasRef}
-      className="block h-[60vh] min-h-[360px] w-full rounded-md bg-stage-bg md:h-[65vh]"
+      className="block h-[60vh] min-h-[360px] w-full rounded-md bg-bg md:h-[65vh]"
       aria-label="Bricklaying replay stage"
     />
   );

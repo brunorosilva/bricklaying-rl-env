@@ -1,18 +1,18 @@
 ---
-title: Atrium Sim Webviz
+title: Monumental.copy Webviz
 emoji: 🧱
 colorFrom: yellow
-colorTo: gray
+colorTo: red
 sdk: gradio
 app_file: app.py
 pinned: false
 license: mit
-short_description: Live backend for the bricklaying-RL frontend
+short_description: Physics backend for a bricklaying robot built to BIM tolerance
 ---
 
-# atrium-sim webviz API
+# Monumental.copy webviz API
 
-The optional live backend for [the atrium-sim frontend](https://brunorosilva.github.io/bricklaying-rl-env/)
+The optional live backend for [the Monumental.copy frontend](https://brunorosilva.github.io/bricklaying-rl-env/)
 (`webviz/api.py`, wrapping `webviz/server.py`). **Not required for that site to work** -
 every case linked from its home page is a precomputed replay baked by
 `scripts/export_traces.py` and served as flat files, so the frontend stays fully usable if

@@ -45,7 +45,17 @@ export type Metrics = {
   deadlocked?: number;
 };
 
-export type HardBody = { kind: string; appear: number; verts: [number, number][] };
+/** `disappear` is set only for a struck arch's centering (the timber former genuinely
+ * leaves the physics world when the ring closes - see atrium_sim/envs/robot_env.py's
+ * _strike_arch and webviz/trajectory.py's _capture_hard) - absent means "never removed"
+ * (lintels, sills, permanent skewback stone). */
+export type HardBody = { kind: string; appear: number; disappear?: number; verts: [number, number][] };
+
+/** One real structural arch (semicircular/segmental/jack), in GLOBAL mm - not per-tick data,
+ * just enough to group voussoir bricks and hard_bodies by which arch they belong to (by
+ * x-range: `x0 <= x <= x1`), since a voussoir's dynamic BrickPose carries no arch identity
+ * once spawned (see webviz/trajectory.py's own comment on why). Used by the "Strike" page. */
+export type ArchRegion = { index: number; style: string; x0: number; x1: number; spring_y: number };
 
 export type Replay = {
   spec: { n_modules: number; n_courses: number };
@@ -60,6 +70,7 @@ export type Replay = {
   _policy?: string;
   robot?: { reach: number };
   hard_bodies?: HardBody[];
+  arch_regions?: ArchRegion[];
 };
 
 /** One flattened animation frame - a single physics tick, with its owning step. */

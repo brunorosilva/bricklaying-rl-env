@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { PALETTE } from "@/lib/replay/shared";
 
 export type OpeningDraft = {
   id: string;
@@ -15,7 +16,11 @@ export type OpeningDraft = {
   arch_ring_courses: number;
 };
 
-const SWATCHES = ["#5aaadc", "#f0c850", "#b25c3e", "#5fb45a", "#d64b45", "#9a7fd6"];
+// A qualitative palette for distinguishing opening regions in the editor - a different
+// visual domain than the wall's own material/measurement language (closer to calendar-event
+// colors than to brick color), so this draws from PALETTE's existing hues rather than the
+// render system's own rules.
+const SWATCHES = [PALETTE.accent, PALETTE.robot, PALETTE.clay, "#6FA9AC", "#C24A3F", PALETTE.chalk];
 
 function newOpening(id: string, col: number, row: number): OpeningDraft {
   return {
@@ -84,8 +89,8 @@ export function GridEditor({ gridCols, gridRows, onGridChange, openings, onOpeni
                   key={`${col},${row}`}
                   onClick={() => handleCellClick(col, row)}
                   title={`col ${col}, row ${row}`}
-                  className="aspect-square w-full transition-opacity hover:opacity-80"
-                  style={{ background: color ?? "#b25c3e33" }}
+                  className="aspect-[11/3] w-full transition-opacity hover:opacity-80"
+                  style={{ background: color ?? `${PALETTE.clay}33` }}
                 />
               );
             }),

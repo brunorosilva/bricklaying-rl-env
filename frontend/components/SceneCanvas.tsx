@@ -1,13 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import {
+  ContactShadows, Environment, Html, Lightformer, OrbitControls, OrthographicCamera,
+  PerspectiveCamera,
+} from "@react-three/drei";
 import * as THREE from "three";
 import type { RefObject } from "react";
 import type { Frame as ReplayFrame, Match, Replay, Target } from "@/lib/replay/types";
-import { BRICK_DEPTH_MM, defaultCameraPosition, extrudedPolygon, unitBox } from "@/lib/replay/scene3d";
-import { ARM_MARGIN_MM, COURSE_MM, HARD_BODY_COLORS, PALETTE, brickFace, foldDeg, qualityColorRgb } from "@/lib/replay/shared";
+import {
+  BRICK_DEPTH_MM, PERSPECTIVE_FOV_DEG, defaultCameraPosition, extrudedPolygon,
+  orthographicFraming, unitBox,
+} from "@/lib/replay/scene3d";
+import {
+  ARM_MARGIN_MM, COURSE_MM, GHOST_OPACITY, HARD_BODY_COLORS, NEXT_SLOT_OPACITY, PALETTE,
+  brickColorRgb, brickFace, foldDeg, jitterSigned, type ViewMode,
+} from "@/lib/replay/shared";
+import { GrainOverlay } from "./GrainOverlay";
 
 type PlayerRefs = {
   tlRef: RefObject<ReplayFrame[]>;
@@ -15,12 +25,7 @@ type PlayerRefs = {
   labelsRef: RefObject<boolean>;
 };
 
-const GHOST_COLOR = new THREE.Color(PALETTE.ghost);
-const NEXT_SLOT_COLOR = new THREE.Color(PALETTE.nextSlot);
-const MORTAR_COLOR = new THREE.Color(PALETTE.mortar);
-const STRAY_COLOR = new THREE.Color(PALETTE.stray);
-const TERRACOTTA_COLOR = new THREE.Color(PALETTE.terracotta);
-const VOUSSOIR_COLOR = new THREE.Color(PALETTE.voussoirFace);
+const CHALK_COLOR = new THREE.Color(PALETTE.chalk);
 
 /** react-three-fiber replay renderer: extrudes the same 2D poses draw.ts consumes into
  * real 3D solids (a wall you can orbit, not a flat sprite), with lighting/shadows so
@@ -28,80 +33,169 @@ const VOUSSOIR_COLOR = new THREE.Color(PALETTE.voussoirFace);
  * rendering-layer swap, not a new episode format; see draw.ts for the 2D counterpart and
  * lib/replay/shared.ts for the palette/color math both share.
  *
+ * `mode` (as-built/inspect/drawing) is a SEPARATE axis from the 2D/3D renderer choice in
+ * ReplayViewer - it swaps the color function (see shared.ts's brickColorRgb) and, in
+ * "drawing", the camera projection (see CameraRig), but has nothing to do with which
+ * renderer is mounted.
+ *
  * `active` is false while the 2D stage is the visible one (ReplayViewer hides this with
  * `display:none` rather than unmounting it, so the R3F root - and its useFrame loops - would
  * otherwise keep rendering an invisible canvas at 60fps). Passed straight through as the
  * Canvas frameloop mode: "always" while visible, "never" while hidden. Don't use "demand" -
  * that needs explicit invalidate() calls this scene never makes. */
+const DEFAULT_HEIGHT_CLASS = "h-[60vh] min-h-[360px] w-full md:h-[65vh]";
+
 export function SceneCanvas({
-  replay, tlRef, curRef, labelsRef, active = true,
-}: { replay: Replay | null; active?: boolean } & PlayerRefs) {
-  const cam = useMemo(
-    () => defaultCameraPosition(replay?.length ?? 3000, replay?.n_courses ?? 6),
-    [replay?.length, replay?.n_courses],
-  );
+  replay, tlRef, curRef, labelsRef, mode, active = true, autoRotate = false, focus, heightClassName,
+}: {
+  replay: Replay | null; mode: ViewMode; active?: boolean; autoRotate?: boolean;
+  /** Crop the CAMERA to a sub-region (e.g. the Strike page zooming in on one arch's
+   * opening) without touching anything actually rendered - the whole replay still draws,
+   * only the framing changes. See scene3d.ts's defaultCameraPosition. */
+  focus?: { centerX: number; span: number };
+  /** Overrides the default full-viewer sizing (60-65vh) - for contexts that AREN'T the main
+   * /replay stage, e.g. the Strike page's one-third-width grid panels or the Compare page's
+   * side-by-side pair, where a viewport-height panel would be absurdly tall. */
+  heightClassName?: string;
+} & PlayerRefs) {
+  const length = replay?.length ?? 3000;
+  const nCourses = replay?.n_courses ?? 6;
 
   return (
-    <div className="relative h-[60vh] min-h-[360px] w-full overflow-hidden rounded-md md:h-[65vh]">
+    <div className={`relative overflow-hidden rounded-md ${heightClassName ?? DEFAULT_HEIGHT_CLASS}`}>
       <Canvas
         shadows
         frameloop={active ? "always" : "never"}
-        camera={{ position: cam.position, fov: 42, near: 10, far: 40000 }}
+        gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.15 }}
         className="!absolute inset-0"
       >
         <color attach="background" args={[PALETTE.bg]} />
         <fog attach="fog" args={[PALETTE.bg, 2000, 9000]} />
-        <ambientLight intensity={0.65} />
+        <ambientLight intensity={0.25} />
         <directionalLight
-          position={[(replay?.length ?? 3000) * 0.3, 2200, 1400]}
-          intensity={1.35}
+          position={[length * 0.3, 2200, 1400]}
+          intensity={1.1}
           castShadow
-          shadow-mapSize={[2048, 2048]}
+          shadow-mapSize={[1024, 1024]}
+          shadow-radius={4}
           shadow-camera-left={-3000}
           shadow-camera-right={3000}
           shadow-camera-top={3000}
           shadow-camera-bottom={-500}
           shadow-camera-far={6000}
         />
-        <hemisphereLight args={[PALETTE.bg, PALETTE.ground, 0.4]} />
-        <Ground length={replay?.length ?? 3000} />
-        {replay && <SceneContents replay={replay} tlRef={tlRef} curRef={curRef} labelsRef={labelsRef} />}
-        <OrbitControls
-          makeDefault
-          maxPolarAngle={Math.PI / 2 - 0.01}
-          minDistance={200}
-          maxDistance={8000}
-        />
-        <CameraRig cam={cam} />
+        <hemisphereLight args={[PALETTE.bg, PALETTE.ground, 0.3]} />
+        {/* Softened via the shadow's own `radius` (a standard PCF blur), NOT drei's
+            SoftShadows - that patches THREE.ShaderChunk with a PCSS shader that assumes a
+            shadow-map chunk shape THREE r185 changed (`unpackRGBAToDepth` no longer resolves
+            at that injection point), producing a hard fragment-shader compile failure in
+            every browser, not a headless-testing artifact - confirmed via a real GLSL
+            compile error, not a driver quirk. */}
+        {/* A virtual light rig baked into a cheap cubemap for image-based lighting - no HDR
+            file (keeps the static export self-contained), just two soft panels: a big warm
+            key from front-above (where clay picks up its specular falloff) and a cool dim
+            rim from behind-left (edge definition against the dark ground). */}
+        <Environment resolution={256} background={false}>
+          <Lightformer form="rect" intensity={2.4} color="#fff2df" position={[length * 0.35, 2600, 2200]} scale={[3200, 2200, 1]} target={[length * 0.35, 0, 0]} />
+          <Lightformer form="rect" intensity={0.5} color="#7fa0c9" position={[-1600, 900, -2600]} scale={[1800, 1800, 1]} />
+        </Environment>
+        <Ground length={length} />
+        <ContactShadows position={[length / 2, 0.5, 0]} opacity={0.45} width={length + 1200} height={1400} blur={2.2} far={500} resolution={512} color="#000000" />
+        {replay && <SceneContents replay={replay} tlRef={tlRef} curRef={curRef} labelsRef={labelsRef} mode={mode} />}
+        {replay && <OutlierLabels tlRef={tlRef} curRef={curRef} labelsRef={labelsRef} mode={mode} />}
+        <CameraRig length={length} nCourses={nCourses} mode={mode} autoRotate={autoRotate} focus={focus} />
       </Canvas>
-      <SceneHud replay={replay} tlRef={tlRef} curRef={curRef} active={active} />
+      <GrainOverlay />
+      <SceneHud replay={replay} tlRef={tlRef} curRef={curRef} active={active} mode={mode} />
     </div>
   );
 }
 
-/** Re-applies the camera position/target whenever `cam` changes (new replay -> new wall
- * length/course count -> different framing). R3F's <Canvas camera={...}> prop only takes
- * effect on the FIRST configure - after that, drei's OrbitControls owns the camera and the
- * prop is silently ignored, so switching specs (e.g. a 4x4 wall -> a 40-module facade)
- * left the eye position stale while only the OrbitControls target moved, framing the new
- * wall wrong. Doing it here (inside the Canvas, once per `cam` change) fixes that without
- * remounting the Canvas - a `key` remount would drop the WebGL context on every switch. */
-function CameraRig({ cam }: { cam: { position: [number, number, number]; target: [number, number, number] } }) {
-  const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update(): void } | null;
+/** Both cameras + OrbitControls, all derived from the same (length, nCourses, aspect, mode)
+ * inputs, declared once here rather than split across the Canvas prop and an imperative
+ * effect. This is a genuine simplification over the old approach (a manual useEffect
+ * correcting a camera position the Canvas's `camera` prop could only set once): `position`,
+ * `target`, `left/right/top/bottom` etc. are all normal reactive R3F props on Object3D-
+ * derived elements, so they're re-applied every render exactly like `<mesh position={...}>`
+ * is - no remount, no stale value, no manual `.update()` call (drei's OrbitControls already
+ * calls `controls.update()` every frame on its own).
+ *
+ * "drawing" mode swaps to the orthographic elevation camera (see scene3d.ts's
+ * orthographicFraming) - the honest architectural view this project's own plans are drawn
+ * in - and disables orbit rotation (pan/zoom only), so it can't be nudged into a 3/4 angle
+ * and stop being an elevation.
+ *
+ * `autoRotate` (used by the home page hero) drifts the camera azimuth continuously via
+ * OrbitControls' own autoRotate, but yields the moment a visitor actually touches the
+ * controls (paused on `onStart`, resumed a few seconds after `onEnd` - not "canceled
+ * forever", since a visitor who lets go probably wants the ambient motion back) and is
+ * disabled outright under `prefers-reduced-motion` or in "drawing" mode. */
+export function CameraRig({
+  length, nCourses, mode, autoRotate = false, focus,
+}: {
+  length: number; nCourses: number; mode: ViewMode; autoRotate?: boolean;
+  focus?: { centerX: number; span: number };
+}) {
+  const { width, height } = useThree((s) => s.size);
+  const aspect = width / Math.max(1, height);
+  const heightMm = nCourses * COURSE_MM;
+  const persp = focus
+    ? defaultCameraPosition(focus.span, nCourses, aspect, false, focus.centerX)
+    : defaultCameraPosition(length, nCourses, aspect);
+  const ortho = orthographicFraming(length, heightMm, aspect);
+  const orthoCenterX = focus?.centerX ?? length / 2;
+  const target: [number, number, number] = mode === "drawing" ? [orthoCenterX, heightMm / 2, 0] : persp.target;
+
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [userActive, setUserActive] = useState(false);
+  const resumeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   useEffect(() => {
-    camera.position.set(...cam.position);
-    if (controls) {
-      controls.target.set(...cam.target);
-      controls.update();
-    } else {
-      camera.lookAt(...cam.target);
-    }
-  }, [cam, camera, controls]);
-  return null;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReducedMotion(mq.matches);
+    const onChange = () => setReducedMotion(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  const effectiveAutoRotate = autoRotate && !reducedMotion && !userActive && mode !== "drawing";
+
+  return (
+    <>
+      <PerspectiveCamera makeDefault={mode !== "drawing"} position={persp.position} fov={PERSPECTIVE_FOV_DEG} near={10} far={40000} />
+      <OrthographicCamera
+        makeDefault={mode === "drawing"}
+        manual
+        position={[orthoCenterX, heightMm / 2, 3000]}
+        left={ortho.left}
+        right={ortho.right}
+        top={ortho.top}
+        bottom={ortho.bottom}
+        near={10}
+        far={6000}
+      />
+      <OrbitControls
+        makeDefault
+        target={target}
+        enableRotate={mode !== "drawing"}
+        autoRotate={effectiveAutoRotate}
+        autoRotateSpeed={0.5}
+        maxPolarAngle={Math.PI / 2 - 0.01}
+        minDistance={200}
+        maxDistance={8000}
+        onStart={() => {
+          clearTimeout(resumeTimer.current);
+          setUserActive(true);
+        }}
+        onEnd={() => {
+          resumeTimer.current = setTimeout(() => setUserActive(false), 4000);
+        }}
+      />
+    </>
+  );
 }
 
-function Ground({ length }: { length: number }) {
+export function Ground({ length }: { length: number }) {
   const w = length + 2000;
   return (
     <mesh position={[length / 2, -100, 0]} receiveShadow>
@@ -116,8 +210,8 @@ function Ground({ length }: { length: number }) {
  * Runs its own rAF (independent of the Canvas's frameloop, which `active` also gates) - kept
  * cheap enough that it just early-returns rather than being torn down while inactive. */
 function SceneHud({
-  replay, tlRef, curRef, active = true,
-}: { replay: Replay | null; active?: boolean } & Pick<PlayerRefs, "tlRef" | "curRef">) {
+  replay, tlRef, curRef, active = true, mode,
+}: { replay: Replay | null; active?: boolean; mode: ViewMode } & Pick<PlayerRefs, "tlRef" | "curRef">) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let raf = 0;
@@ -128,27 +222,100 @@ function SceneHud({
         const st = tl[ci].st;
         const isRobot = !!replay.robot;
         const tail = isRobot ? `moves ${st.moves ?? 0}   placed ${st.placements ?? 0}` : `waste ${st.waste ?? 0}`;
-        const mode = isRobot ? `${["place", "move ←", "move →"][st.mode ?? 0]}   ` : "";
+        const modeLabel = isRobot ? `${["place", "move ←", "move →"][st.mode ?? 0]}   ` : "";
         ref.current.textContent =
           `${replay._policy ?? ""}   ${replay.spec.n_modules}m × ${replay.spec.n_courses}c   ` +
-          `step ${st.i + 1}/${replay.steps.length}   ${mode}in-tol ${(st.frac_in_tol * 100).toFixed(0)}%   ` +
-          `filled ${(st.frac_filled * 100).toFixed(0)}%   ${tail}   return ${st.return.toFixed(2)}`;
+          `step ${st.i + 1}/${replay.steps.length}   ${modeLabel}in-tol ${(st.frac_in_tol * 100).toFixed(0)}%   ` +
+          `filled ${(st.frac_filled * 100).toFixed(0)}%   ${tail}   return ${st.return.toFixed(2)}   view ${mode}`;
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [replay, tlRef, curRef, active]);
+  }, [replay, tlRef, curRef, active, mode]);
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-0 flex h-8 items-center gap-3 bg-hudBg/90 px-3 font-mono text-[12px]" style={{ background: PALETTE.hudBg + "e6" }}>
-      <span style={{ color: PALETTE.nextSlot }}>atrium-sim</span>
+    <div
+      className="pointer-events-none absolute inset-x-0 top-0 flex h-8 items-center gap-3 px-3 font-mono text-[12px]"
+      style={{ background: PALETTE.hudBg + "e6" }}
+    >
+      <span style={{ color: PALETTE.accent }}>Monumental.copy</span>
       <span ref={ref} style={{ color: PALETTE.hudText }} />
     </div>
   );
 }
 
-function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } & PlayerRefs) {
+type OutlierLabel = { key: string; x: number; y: number; text: string };
+
+/** mm deviation callouts, drawn ONLY for outliers (|dx| > TOL_MM) and only in "inspect" mode
+ * - the old 2D-renderer-derived behavior labeled every matched brick (all 600 of them on a
+ * full facade), which is exactly the clutter the rest of this redesign is undoing. There was
+ * never a 3D equivalent before this (labelsRef was plumbed through but unused here) - this
+ * adds one, deliberately narrow in scope.
+ *
+ * Driven by a rAF poll + a signature comparison (not a per-tick React re-render): the label
+ * SET only changes when a brick is placed/matched, far less often than the 30fps playhead
+ * advances, so `setLabels` only fires when the outlier set actually differs from last frame -
+ * everything else in this scene stays ref-only for exactly this reason. */
+function OutlierLabels({
+  tlRef, curRef, labelsRef, mode,
+}: { mode: ViewMode } & Pick<PlayerRefs, "tlRef" | "curRef" | "labelsRef">) {
+  const [labels, setLabels] = useState<OutlierLabel[]>([]);
+
+  useEffect(() => {
+    let raf = 0;
+    let lastSig = "";
+    const tick = () => {
+      const tl = tlRef.current;
+      const showing = mode === "inspect" && labelsRef.current && tl.length > 0;
+      if (showing) {
+        const ci = Math.min(Math.max(0, Math.floor(curRef.current)), tl.length - 1);
+        const frame = tl[ci];
+        const byId = new Map(frame.bricks.map((b) => [b[4], b] as const));
+        const next: OutlierLabel[] = [];
+        for (const m of frame.st.matches ?? []) {
+          if (m.in_tol) continue;
+          const b = byId.get(m.brick_id);
+          if (!b) continue;
+          const [, h] = brickFace(b[3]);
+          next.push({
+            key: String(m.brick_id),
+            x: b[0],
+            y: b[1] + h / 2 + 14,
+            text: `${m.dx >= 0 ? "+" : ""}${m.dx.toFixed(1)}`,
+          });
+        }
+        const sig = next.map((l) => `${l.key}:${l.text}`).join("|");
+        if (sig !== lastSig) {
+          lastSig = sig;
+          setLabels(next);
+        }
+      } else if (lastSig !== "") {
+        lastSig = "";
+        setLabels([]);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [mode, labelsRef, tlRef, curRef]);
+
+  return (
+    <>
+      {labels.map((l) => (
+        <Html key={l.key} position={[l.x, l.y, 0]} center distanceFactor={800} style={{ pointerEvents: "none" }}>
+          <span className="font-mono text-[11px]" style={{ color: PALETTE.label }}>
+            {l.text}
+          </span>
+        </Html>
+      ))}
+    </>
+  );
+}
+
+export function SceneContents({
+  replay, tlRef, curRef, labelsRef, mode,
+}: { replay: Replay; mode: ViewMode } & PlayerRefs) {
   const maxFlat = useMemo(
     () => Math.max(1, ...replay.steps.flatMap((st) => st.ticks.map((t) => t.filter((b) => b[3] !== 2).length))),
     [replay],
@@ -159,7 +326,7 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
   );
   const maxHard = (replay.hard_bodies ?? []).length;
 
-  const flatRefs = useRef<(THREE.Mesh | null)[]>([]);
+  const flatMeshRef = useRef<THREE.InstancedMesh>(null);
   const voussoirRefs = useRef<(THREE.Mesh | null)[]>([]);
   const hardRefs = useRef<(THREE.Mesh | null)[]>([]);
   const ghostRefs = useRef<(THREE.LineSegments | null)[]>([]);
@@ -177,6 +344,21 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
   const ghostGeom = useMemo(() => new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), []);
   const wheelGeom = useMemo(() => new THREE.CylinderGeometry(30, 30, 14, 20), []);
 
+  // Scratch objects reused every brick, every frame - up to ~600 bricks x 30fps, so a fresh
+  // Matrix4/Quaternion/Vector3/Color per brick per frame would be a meaningful GC pressure
+  // source; these are mutated in place instead.
+  const scratch = useMemo(
+    () => ({
+      matrix: new THREE.Matrix4(),
+      quat: new THREE.Quaternion(),
+      euler: new THREE.Euler(),
+      pos: new THREE.Vector3(),
+      scale: new THREE.Vector3(),
+      color: new THREE.Color(),
+    }),
+    [],
+  );
+
   useFrame(() => {
     const tl = tlRef.current;
     if (!tl.length) return;
@@ -193,7 +375,9 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
       matchByBrick.set(m.brick_id, m);
     }
 
-    // --- ghost targets + next-slot highlight ---
+    // --- ghost targets + next-slot highlight - always chalk, differing only in opacity, so
+    // "not yet real" reads as one consistent hue rather than competing with the wall's own
+    // material or measurement colors ---
     const cursor = frame.st.cursor;
     let nextTarget: Target | null = null;
     if (cursor != null) {
@@ -211,26 +395,34 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
         seg.position.set(t.x, t.y, 0);
         seg.scale.set(t.w, t.h, BRICK_DEPTH_MM);
         const isNext = t === nextTarget;
-        (seg.material as THREE.LineBasicMaterial).color.copy(isNext ? NEXT_SLOT_COLOR : GHOST_COLOR);
-        (seg.material as THREE.LineBasicMaterial).linewidth = isNext ? 2 : 1;
+        const mat = seg.material as THREE.LineBasicMaterial;
+        mat.color.copy(CHALK_COLOR);
+        mat.opacity = isNext ? NEXT_SLOT_OPACITY : GHOST_OPACITY;
+        mat.linewidth = isNext ? 2 : 1;
       }
     });
 
-    // --- static hard bodies (fade in by frame index) ---
+    // --- static hard bodies: fade in at `appear`, and (a struck arch's centering only) fade
+    // back out at `disappear` - see webviz/trajectory.py's _capture_hard for why this needed
+    // an upper bound at all: without it, a struck centering that's genuinely gone from the
+    // physics world kept rendering under every arch for the rest of the episode. ---
     (replay.hard_bodies ?? []).forEach((hb, i) => {
       const mesh = hardRefs.current[i];
       if (!mesh) return;
-      mesh.visible = hb.appear <= frame.gi;
-      // cached by content (see extrudedPolygon), so re-assigning the same shape every
-      // frame is a cheap Map lookup, not a geometry rebuild - simpler than tracking
-      // whether this specific mesh already has it.
+      const disappear = hb.disappear ?? Infinity;
+      mesh.visible = hb.appear <= frame.gi && frame.gi < disappear;
       mesh.geometry = extrudedPolygon(hb.verts, BRICK_DEPTH_MM);
+      const fill = mode === "drawing" ? PALETTE.chalk : HARD_BODY_COLORS[hb.kind]?.[0] ?? PALETTE.stone;
+      (mesh.material as THREE.MeshStandardMaterial).color.set(fill);
     });
 
-    // --- bricks: split into the flat pool (shared box, scaled) and the voussoir pool
-    // (per-shape extruded geometry) ---
+    // --- bricks: one InstancedMesh for the flat pool (600 draw calls -> 1), plus a small
+    // pool of individually-shaped voussoir meshes (each ring has at most a couple dozen
+    // distinct wedge shapes - not worth instancing). Color comes from shared.ts's
+    // brickColorRgb, the single place all three view modes' rules live. ---
     let flatI = 0;
     let voussoirI = 0;
+    const flatMesh = flatMeshRef.current;
     for (const b of bricks) {
       const [x, y, theta, kind, brickId] = b;
       if (kind === 2 && b.length === 6) {
@@ -241,32 +433,50 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
         mesh.position.set(x, y, 0);
         mesh.rotation.set(0, 0, theta);
         mesh.scale.set(1, 1, 1);
-        (mesh.material as THREE.MeshStandardMaterial).color.copy(VOUSSOIR_COLOR);
+        // a real structural voussoir is never scored by the flat-wall audit - "flight"
+        // status is the honest read in every mode: as-built shows jittered clay, inspect
+        // shows the neutral "no reading" grey (true both before AND after it settles, not
+        // just "not yet audited"), drawing shows flat chalk.
+        const [r, g, bl] = brickColorRgb(mode, brickId, "flight", null, null);
+        (mesh.material as THREE.MeshStandardMaterial).color.setRGB(r, g, bl);
         continue;
       }
-      const mesh = flatRefs.current[flatI++];
-      if (!mesh) continue;
+      if (!flatMesh) {
+        flatI++;
+        continue;
+      }
       const [w, h] = brickFace(kind);
       const m = matchByBrick.get(brickId);
-      let color = STRAY_COLOR;
-      if (m) color = new THREE.Color(...qualityColorRgb(m.d, m.in_tol));
-      else if (foldDeg(theta) < 15) color = TERRACOTTA_COLOR;
-      mesh.visible = true;
-      mesh.position.set(x, y, 0);
-      mesh.rotation.set(0, 0, theta);
-      mesh.scale.set(w, h, BRICK_DEPTH_MM);
-      (mesh.material as THREE.MeshStandardMaterial).color.copy(color);
+      const upright = foldDeg(theta) < 15;
+      const status = m ? "matched" : upright ? "flight" : "stray";
+      // a subtle per-course z stagger + rotation jitter - every brick sitting at exactly
+      // z=0 read as an extruded sprite, not a built wall; real wythes aren't a plane.
+      const courseIdx = Math.round((y - 30) / COURSE_MM);
+      const zOff = (courseIdx % 2 === 0 ? 1 : -1) * 6;
+      const rotJitter = (jitterSigned(brickId * 5 + 1) * 0.15 * Math.PI) / 180;
+      scratch.pos.set(x, y, zOff);
+      scratch.euler.set(0, 0, theta + rotJitter);
+      scratch.quat.setFromEuler(scratch.euler);
+      scratch.scale.set(w, h, BRICK_DEPTH_MM);
+      scratch.matrix.compose(scratch.pos, scratch.quat, scratch.scale);
+      flatMesh.setMatrixAt(flatI, scratch.matrix);
+      const [r, g, bl] = brickColorRgb(mode, brickId, status, m?.dx ?? null, m?.in_tol ?? null);
+      scratch.color.setRGB(r, g, bl);
+      flatMesh.setColorAt(flatI, scratch.color);
+      flatI++;
     }
-    for (let i = flatI; i < flatRefs.current.length; i++) {
-      const mesh = flatRefs.current[i];
-      if (mesh) mesh.visible = false;
+    if (flatMesh) {
+      flatMesh.count = flatI;
+      flatMesh.instanceMatrix.needsUpdate = true;
+      if (flatMesh.instanceColor) flatMesh.instanceColor.needsUpdate = true;
     }
     for (let i = voussoirI; i < voussoirRefs.current.length; i++) {
       const mesh = voussoirRefs.current[i];
       if (mesh) mesh.visible = false;
     }
 
-    // --- mobile gantry ---
+    // --- mobile gantry - equipment, not a toy: steel body, one amber tool/gripper, the same
+    // materials in every view mode (it's site infrastructure, not part of what's measured) ---
     if (isRobot && frame.base != null && gantryRef.current) {
       const reach = replay.robot!.reach;
       const beamY = COURSE_MM * replay.n_courses + ARM_MARGIN_MM;
@@ -307,14 +517,12 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
 
   return (
     <group>
-      {Array.from({ length: maxFlat }, (_, i) => (
-        <mesh key={`flat-${i}`} ref={(el) => (flatRefs.current[i] = el)} geometry={flatGeom} castShadow receiveShadow>
-          <meshStandardMaterial color={PALETTE.terracotta} roughness={0.85} />
-        </mesh>
-      ))}
+      <instancedMesh ref={flatMeshRef} args={[flatGeom, undefined, maxFlat]} castShadow receiveShadow frustumCulled={false}>
+        <meshStandardMaterial roughness={0.85} />
+      </instancedMesh>
       {Array.from({ length: maxVoussoir }, (_, i) => (
         <mesh key={`vou-${i}`} ref={(el) => (voussoirRefs.current[i] = el)} castShadow receiveShadow>
-          <meshStandardMaterial color={PALETTE.voussoirFace} roughness={0.8} />
+          <meshStandardMaterial color={PALETTE.clay} roughness={0.8} />
         </mesh>
       ))}
       {Array.from({ length: maxHard }, (_, i) => {
@@ -328,7 +536,7 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
       })}
       {replay.targets.map((_, i) => (
         <lineSegments key={`ghost-${i}`} ref={(el) => (ghostRefs.current[i] = el)} geometry={ghostGeom}>
-          <lineBasicMaterial color={PALETTE.ghost} transparent opacity={0.55} />
+          <lineBasicMaterial color={PALETTE.chalk} transparent opacity={GHOST_OPACITY} />
         </lineSegments>
       ))}
       {replay.robot && (
@@ -358,7 +566,7 @@ function SceneContents({ replay, tlRef, curRef, labelsRef }: { replay: Replay } 
           </mesh>
           <mesh ref={reachBandRef}>
             <planeGeometry args={[1, 1]} />
-            <meshBasicMaterial color={PALETTE.nextSlot} transparent opacity={0.08} depthWrite={false} />
+            <meshBasicMaterial color={PALETTE.robotTool} transparent opacity={0.08} depthWrite={false} />
           </mesh>
         </group>
       )}

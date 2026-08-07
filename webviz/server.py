@@ -340,7 +340,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"atrium-sim webviz serving on http://{args.host}:{args.port}")
+    print(f"Monumental.copy webviz serving on http://{args.host}:{args.port}")
     ts = tailscale_ip()
     if ts:
         print(f"  tailnet URL:  http://{ts}:{args.port}   <- open this from your laptop")

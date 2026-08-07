@@ -440,10 +440,29 @@ class FacadePlan:
                 continue
             spec, spring_course, top_course = resolved
             void_x0, void_x1 = _arch_void_bounds_mm(o, spec)
+            # A jack ring's needed_courses (_resolve_arch) is chosen so its RAW geometric
+            # top lands exactly on the crown course line - by design, a flat ring has no
+            # rise, so there's no extra room to reserve above it the way a curved arch's
+            # rise creates one. But crown_packing_hard_body's own gap check adds SHAPE_RADIUS
+            # (the voussoir's rounded collision hull - genuinely 0.5mm taller than the raw
+            # geometry) before comparing to the crown line, which tips that intentional exact
+            # match into a 0.5mm OVERLAP instead: the ring's true collision surface pokes
+            # into the flat crown-course brick's target space, that check sees "ring already
+            # reaches crown" and skips the fix entirely, and the crown brick is born in a
+            # sliver of collision and topples (confirmed: every seed, every jack ring width,
+            # 100% of episodes - including the privileged oracle policy, so it's not a policy
+            # gap). Nudging the springing down by that same SHAPE_RADIUS cancels it out
+            # exactly (ring_top_y = spring_y + ring_depth + SHAPE_RADIUS becomes
+            # crown_course's own line again) - scoped to jack only, since semicircular/
+            # segmental's real (tens-of-mm) rise-driven gap already swallows 0.5mm with room
+            # to spare and those two are already confirmed working; no reason to touch them.
+            spring_y = COURSE_MM * spring_course
+            if spec.kind == "jack":
+                spring_y -= SHAPE_RADIUS
             out.append(ArchRegion(
                 opening_index=i, spec=spec,
                 origin_x=(o.col + o.n_cols / 2.0) * MODULE_MM,
-                spring_y=COURSE_MM * spring_course,
+                spring_y=spring_y,
                 springing_course=spring_course, crown_course=top_course,
                 void_x0=void_x0, void_x1=void_x1,
             ))
