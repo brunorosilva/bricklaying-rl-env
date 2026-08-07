@@ -57,6 +57,7 @@ SPEC_LABELS = {
     "8x5": ("8×5 wall - beyond reach", "wall"), "10x6": ("10×6 wall", "wall"),
     "17x8": ("17×8 facade panel", "wall"), "random": ("Surprise me", "wall"),
     "house:uk_terrace": ("UK terrace - 3 structural arches", "house"),
+    "house:uk_terrace_classic": ("UK terrace, classic - jack-free, 100% fill", "house"),
     "house:colonial": ("Colonial facade - image → plan", "house"),
 }
 

@@ -49,6 +49,13 @@ const CASES: Case[] = [
     tag: "structural arches",
   },
   {
+    title: "UK terrace (classic)",
+    description: "Two round-arched windows flank a segmental door - the same facade, jack-free. robot18 aces it: 100% fill, every ring struck and standing.",
+    env: "robot",
+    spec: "house:uk_terrace_classic",
+    tag: "100% fill",
+  },
+  {
     title: "Colonial facade",
     description: "A VLM-perceived elevation from a photograph, tiled into 13 buildable panels around five openings.",
     env: "robot",
