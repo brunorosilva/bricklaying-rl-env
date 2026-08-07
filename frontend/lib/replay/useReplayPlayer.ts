@@ -24,7 +24,7 @@ export function useReplayPlayer(replay: Replay | null) {
   const tlRef = useRef<Frame[]>([]);
   const curRef = useRef(0);
   const playingRef = useRef(false);
-  const speedRef = useRef(1);
+  const speedRef = useRef(2);
   const labelsRef = useRef(false);
   const viewRef = useRef<View | null>(null);
   const cssSizeRef = useRef({ w: 0, h: 0 });

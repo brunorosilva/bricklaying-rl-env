@@ -42,7 +42,7 @@ export function PlaybackControls({
       <label className="flex items-center gap-1.5 text-xs text-muted">
         speed
         <select
-          defaultValue="1"
+          defaultValue="2"
           onChange={(e) => onSpeed(parseFloat(e.target.value))}
           className="rounded-md border border-line bg-panel-2 px-2 py-1 text-ink"
         >
