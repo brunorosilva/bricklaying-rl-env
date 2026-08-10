@@ -39,11 +39,11 @@ BRAND_CSS = """
 a, a:visited { color: #F2B94B !important; }
 """
 
-with gr.Blocks(title="Monumental.copy webviz API", css=BRAND_CSS) as demo:
+with gr.Blocks(title="Bricklaying with RL webviz API", css=BRAND_CSS) as demo:
     gr.Markdown(
-        "# 🧱 Monumental.copy\n\n"
+        "# 🧱 Bricklaying with RL\n\n"
         "**This page isn't the product** - it's the live physics backend behind "
-        "[**the Monumental.copy frontend**](https://brunorosilva.github.io/bricklaying-rl-env/), "
+        "[**the Bricklaying with RL frontend**](https://brunorosilva.github.io/bricklaying-rl-env/), "
         "which is where you actually want to be. The featured policy there lays a "
         "16-module wall to **100% fill, 99.4% within ±3&nbsp;mm** of blueprint - real "
         "rigid-body physics underneath, judged like a site inspection.\n\n"

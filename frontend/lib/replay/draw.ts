@@ -242,7 +242,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, cssW: number, cssH: num
   ctx.textAlign = "left";
   ctx.font = "13px var(--font-mono), monospace";
   ctx.fillStyle = PALETTE.accent;
-  ctx.fillText("Monumental.copy", 12, 20);
+  ctx.fillText("Bricklaying with RL", 12, 20);
   ctx.fillStyle = HUD_TEXT;
   const st = frame.st;
   const tail = isRobot ? `moves ${st.moves ?? 0}   placed ${st.placements ?? 0}` : `waste ${st.waste ?? 0}`;

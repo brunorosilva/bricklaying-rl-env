@@ -11,7 +11,7 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"], dis
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"], display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Monumental.copy",
+  title: "Bricklaying with RL",
   description: "Watch a policy lay a running-bond brick wall to BIM ±3mm tolerance.",
 };
 
@@ -21,7 +21,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-screen bg-bg font-sans text-[15px] text-ink antialiased">
         <header className="flex flex-wrap items-center gap-4 border-b border-line px-5 py-3.5">
           <Link href="/" className="text-[15px] font-semibold tracking-wide text-accent">
-            Monumental.copy
+            Bricklaying with RL
           </Link>
           <nav className="flex gap-4 text-sm text-muted">
             <Link href="/" className="hover:text-ink">

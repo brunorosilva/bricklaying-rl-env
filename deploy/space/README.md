@@ -1,5 +1,5 @@
 ---
-title: Monumental.copy Webviz
+title: Bricklaying with RL Webviz
 emoji: 🧱
 colorFrom: yellow
 colorTo: red
@@ -10,9 +10,9 @@ license: mit
 short_description: Physics backend for a bricklaying robot built to BIM tolerance
 ---
 
-# Monumental.copy webviz API
+# Bricklaying with RL webviz API
 
-The optional live backend for [the Monumental.copy frontend](https://brunorosilva.github.io/bricklaying-rl-env/)
+The optional live backend for [the Bricklaying with RL frontend](https://brunorosilva.github.io/bricklaying-rl-env/)
 (`webviz/api.py`, wrapping `webviz/server.py`). **Not required for that site to work** -
 every case linked from its home page is a precomputed replay baked by
 `scripts/export_traces.py` and served as flat files, so the frontend stays fully usable if

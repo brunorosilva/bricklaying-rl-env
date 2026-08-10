@@ -239,7 +239,7 @@ function SceneHud({
       className="pointer-events-none absolute inset-x-0 top-0 flex h-8 items-center gap-3 px-3 font-mono text-[12px]"
       style={{ background: PALETTE.hudBg + "e6" }}
     >
-      <span style={{ color: PALETTE.accent }}>Monumental.copy</span>
+      <span style={{ color: PALETTE.accent }}>Bricklaying with RL</span>
       <span ref={ref} style={{ color: PALETTE.hudText }} />
     </div>
   );

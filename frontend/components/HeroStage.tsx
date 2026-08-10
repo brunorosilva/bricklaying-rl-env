@@ -78,7 +78,7 @@ export function HeroStage() {
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-bg/90 via-transparent to-bg/30" />
 
       <div className="absolute inset-0 z-10 flex flex-col justify-end gap-4 px-5 pb-10 md:px-10 md:pb-14">
-        <span className="text-[15px] font-semibold tracking-wide text-accent">Monumental.copy</span>
+        <span className="text-[15px] font-semibold tracking-wide text-accent">Bricklaying with RL</span>
         <h1 className="max-w-xl text-2xl font-semibold text-ink md:text-3xl">
           A physics-based bricklaying robot, built to BIM tolerance
         </h1>

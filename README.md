@@ -1,18 +1,19 @@
-# Monumental.copy
+# Bricklaying with RL
 
 **A physics-based bricklaying robot, and the reward function that taught it to build.**
 
-`Monumental.copy` is a Gymnasium + PyMunk environment where a mobile robot lays a running-bond
+**Bricklaying with RL** is a Gymnasium + PyMunk environment where a mobile robot lays a running-bond
 brick wall to real construction tolerances — every brick within **BIM ±3mm**, judged by
 live rigid-body physics, so a careless placement can topple the wall. This README is the
 build log of that robot: what its reward function had to encode, which pieces of it were
 wrong, how each failure was diagnosed, and what finally worked.
 
-![robot18 traversing 3520mm to complete a 16×6 wall, zero-shot](media/robot18_16x6.gif)
+![robot18 laying a UK-terrace facade — three real structural arches, zero-shot](media/robot18_uk_terrace_classic.gif)
 
-That is `robot18`, the current policy, laying a 16-module-wide wall from a random starting
-point on its rail — a wall almost twice as wide as anything it trained on, completed to
-**100% fill and 99.4% within tolerance**. It got there without a bigger network. Every gain
+That is `robot18`, the current policy, laying a UK-terrace facade — two round-arched windows
+and a segmental-arched door, three real structural arches built the way masons build them:
+voussoir rings closed at a keystone and struck once their centering is pulled. **100% fill,
+every ring closed, every one standing.** It got there without a bigger network. Every gain
 in this project came from changing what the reward function measures and when it pays out.
 
 **Why this exists.** I built this because of [**Monumental**](https://www.monumental.co), the

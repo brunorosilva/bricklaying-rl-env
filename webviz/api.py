@@ -58,7 +58,7 @@ ALLOWED_ORIGINS = [
     *([os.environ["EXTRA_ALLOWED_ORIGIN"]] if os.environ.get("EXTRA_ALLOWED_ORIGIN") else []),
 ]
 
-app = FastAPI(title="Monumental.copy webviz API")
+app = FastAPI(title="Bricklaying with RL webviz API")
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
@@ -146,7 +146,7 @@ def _plan_rejection(plan: dict) -> str | None:
 
 @app.get("/")
 def root():
-    return {"service": "Monumental.copy webviz API", "docs": "/docs"}
+    return {"service": "Bricklaying with RL webviz API", "docs": "/docs"}
 
 
 @app.get("/policies")
