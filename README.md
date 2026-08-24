@@ -8,7 +8,7 @@ live rigid-body physics, so a careless placement can topple the wall. This READM
 build log of that robot: what its reward function had to encode, which pieces of it were
 wrong, how each failure was diagnosed, and what finally worked.
 
-![robot18 laying a UK-terrace facade — three real structural arches, zero-shot](media/robot18_uk_terrace_classic.gif)
+![robot18 laying a UK-terrace facade — three real structural arches, zero-shot](media/demo.mov)
 
 That is `robot18`, the current policy, laying a UK-terrace facade — two round-arched windows
 and a segmental-arched door, three real structural arches built the way masons build them:
