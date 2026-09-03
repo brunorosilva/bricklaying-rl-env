@@ -45,10 +45,7 @@ SPACE_DAMPING = 0.90
 SPACE_ITERATIONS = 30           # default 10 is too soft for 5-high stacks
 SLEEP_TIME_THRESHOLD = 0.15     # s of quiet before a body sleeps (= settle criterion)
 IDLE_SPEED_THRESHOLD = 20.0     # mm/s; max hidden creep over the window ~ 3mm ~ tol
-COLLISION_SLOP = 0.1            # mm of allowed overlap. Slop sag is systematic (~slop/3
-                                # per course, cumulative): 0.5 would sink course 5 by
-                                # ~3.7mm - outside tolerance. 0.1 keeps it ~1mm and
-                                # measurably does not hurt sleep-based settling.
+COLLISION_SLOP = 0.1            # mm of allowed overlap between objects.
 
 # --- Placement mechanics ---
 SPAWN_DROP_MM = 5.0             # brick spawns this far above rest height (the gentle drop)
